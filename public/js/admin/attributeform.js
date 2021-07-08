@@ -11,7 +11,7 @@ attributeForm.init = function (layer, geomtype) {
     Ext.QuickTips.init();
     // create attributes store
     attributeForm.attributeStore = new GeoExt.data.AttributeStore({
-        url: '/wfs/' + screenName + '/' + schema + '?REQUEST=DescribeFeatureType&TYPENAME=' + layer,
+        url: '/wfs/' + (subUser ? screenName + "@" + parentdb : screenName) + '/' + schema + '?SERVICE=wfs&VERSION=1.0.0&REQUEST=DescribeFeatureType&TYPENAME=' + layer,
         listeners: {
             load: {
                 scope: this,
@@ -148,7 +148,9 @@ function getFieldType(attrType) {
         "xsd:integer": "int",
         "xsd:short": "int",
         "xsd:long": "int",
-        "xsd:date": "date",
+        "xsd:date": "string",
+        "xsd:dateTime": "string",
+        "xsd:time": "string",
         "xsd:string": "string",
         "xsd:float": "float",
         "xsd:double": "float",

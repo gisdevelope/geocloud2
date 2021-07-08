@@ -1,35 +1,42 @@
 <?php
 /**
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2021 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
  *
  */
 
 namespace app\inc;
 
+use Exception;
+
+
+/**
+ * Class Util
+ * @package app\inc
+ */
 class Util
 {
     /**
-     * @param $class
-     * @param $object
+     * @param string $class
+     * @param object $object
      * @return mixed
      */
-    static function casttoclass($class, $object)
+    public static function casttoclass(string $class, object $object)
     {
         return unserialize(preg_replace('/^O:\d+:"[^"]++"/', 'O:' . strlen($class) . ':"' . $class . '"', serialize($object)));
     }
 
     /**
-     * @param $dir
+     * @param string $dir
      */
-    static function rrmdir($dir)
+    public static function rrmdir(string $dir): void
     {
         if (is_dir($dir)) {
             $objects = scandir($dir);
             foreach ($objects as $object) {
                 if ($object != "." && $object != "..") {
-                    if (filetype($dir . "/" . $object) == "dir") rrmdir($dir . "/" . $object); else unlink($dir . "/" . $object);
+                    if (filetype($dir . "/" . $object) == "dir") self::rrmdir($dir . "/" . $object); else unlink($dir . "/" . $object);
                 }
             }
             reset($objects);
@@ -38,21 +45,12 @@ class Util
     }
 
     /**
-     * @param $match
-     * @return null|string|string[]
-     */
-    static function replace_unicode_escape_sequence($match)
-    {
-        return mb_convert_encoding(pack('H*', $match[1]), 'UTF-8', 'UCS-2BE');
-    }
-
-    /**
-     * @param $hexStr
+     * @param string $hexStr
      * @param bool $returnAsString
      * @param string $seperator
-     * @return array|bool|string
+     * @return array<string>|bool|string
      */
-    static function hex2RGB($hexStr, $returnAsString = false, $seperator = ',')
+    public static function hex2RGB(string $hexStr, bool $returnAsString = false, string $seperator = ',')
     {
         $hexStr = preg_replace("/[^0-9A-Fa-f]/", '', $hexStr);
         // Gets a proper hex string
@@ -77,16 +75,16 @@ class Util
     /**
      * @return string
      */
-    static function randHexColor()
+    public static function randHexColor(): string
     {
         return sprintf('#%06X', mt_rand(0, 0xFFFFFF));
     }
 
     /**
-     * @param $code
-     * @return mixed
+     * @param int|string $code
+     * @return string|null
      */
-    static function httpCodeText($code)
+    public static function httpCodeText($code): ?string
     {
         $codes = array(
             200 => "OK",
@@ -105,18 +103,17 @@ class Util
             503 => "Service Unavailable",
             504 => "Gateway timeout"
         );
-        return $codes[$code];
+        return $codes[$code] ?? null;
     }
 
     /**
-     * @param $start
-     * @param $end
-     * @param $steps
-     * @return array
+     * @param string $start
+     * @param string $end
+     * @param int $steps
+     * @return array<mixed>
      */
-    static function makeGradient($start, $end, $steps)
+    public static function makeGradient(string $start, string $end, int $steps): array
     {
-
         $theColorBegin = hexdec($start);
         $theColorEnd = hexdec($end);
 
@@ -128,20 +125,11 @@ class Util
         $theG1 = ($theColorEnd & 0x00ff00) >> 8;
         $theB1 = ($theColorEnd & 0x0000ff) >> 0;
 
-        function interpolate($pBegin, $pEnd, $pStep, $pMax)
-        {
-            if ($pBegin < $pEnd) {
-                return (($pEnd - $pBegin) * ($pStep / $pMax)) + $pBegin;
-            } else {
-                return (($pBegin - $pEnd) * (1 - ($pStep / $pMax))) + $pEnd;
-            }
-        }
-
         $grad = array();
         for ($i = 0; $i <= $steps; $i++) {
-            $theR = interpolate($theR0, $theR1, $i, $steps);
-            $theG = interpolate($theG0, $theG1, $i, $steps);
-            $theB = interpolate($theB0, $theB1, $i, $steps);
+            $theR = self::interpolate($theR0, $theR1, $i, $steps);
+            $theG = self::interpolate($theG0, $theG1, $i, $steps);
+            $theB = self::interpolate($theB0, $theB1, $i, $steps);
 
             $theVal = ((($theR << 8) | $theG) << 8) | $theB;
 
@@ -152,9 +140,25 @@ class Util
     }
 
     /**
+     * @param int $pBegin
+     * @param int $pEnd
+     * @param int $pStep
+     * @param int $pMax
+     * @return int
+     */
+    private static function interpolate(int $pBegin, int $pEnd, int $pStep, int $pMax): int
+    {
+        if ($pBegin < $pEnd) {
+            return (($pEnd - $pBegin) * ($pStep / $pMax)) + $pBegin;
+        } else {
+            return (($pBegin - $pEnd) * (1 - ($pStep / $pMax))) + $pEnd;
+        }
+    }
+
+    /**
      * @return float
      */
-    static function microtime_float()
+    public static function microtime_float(): float
     {
         list($usec, $sec) = explode(" ", microtime());
         return ((float)$usec + (float)$sec);
@@ -163,7 +167,7 @@ class Util
     /**
      * @return string
      */
-    static function protocol()
+    public static function protocol(): string
     {
         if (isset($_SERVER['HTTPS']) &&
             ($_SERVER['HTTPS'] == 'on' || $_SERVER['HTTPS'] == 1) ||
@@ -178,15 +182,15 @@ class Util
     }
 
     /**
-     * @param $ip
-     * @param $range
+     * @param string $ip
+     * @param string $ipWithCidr
      * @return bool
      */
-    static function ipInRange($ip, $range)
+    public static function ipInRange(string $ip, string $ipWithCidr): bool
     {
-        if (strpos($range, '/') !== false) {
+        if (strpos($ipWithCidr, '/') !== false) {
             // $range is in IP/NETMASK format
-            list($range, $netmask) = explode('/', $range, 2);
+            list($range, $netmask) = explode('/', $ipWithCidr, 2);
             if (strpos($netmask, '.') !== false) {
                 // $netmask is a 255.255.0.0 format
                 $netmask = str_replace('*', '0', $netmask);
@@ -206,22 +210,22 @@ class Util
                 #$netmask_dec = bindec(str_pad('', $netmask, '1') . str_pad('', 32-$netmask, '0'));
 
                 # Strategy 2 - Use math to create it
-                $wildcard_dec = pow(2, (32 - $netmask)) - 1;
+                $wildcard_dec = pow(2, (32 - (int)$netmask)) - 1;
                 $netmask_dec = ~$wildcard_dec;
 
                 return (($ip_dec & $netmask_dec) == ($range_dec & $netmask_dec));
             }
         } else {
             // range might be 255.255.*.* or 1.2.3.0-1.2.3.255
-            if (strpos($range, '*') !== false) { // a.b.*.* format
+            if (strpos($ipWithCidr, '*') !== false) { // a.b.*.* format
                 // Just convert to A-B format by setting * to 0 for A and 255 for B
-                $lower = str_replace('*', '0', $range);
-                $upper = str_replace('*', '255', $range);
-                $range = "$lower-$upper";
+                $lower = str_replace('*', '0', $ipWithCidr);
+                $upper = str_replace('*', '255', $ipWithCidr);
+                $ipWithCidr = "$lower-$upper";
             }
 
-            if (strpos($range, '-') !== false) { // A-B format
-                list($lower, $upper) = explode('-', $range, 2);
+            if (strpos($ipWithCidr, '-') !== false) { // A-B format
+                list($lower, $upper) = explode('-', $ipWithCidr, 2);
                 $lower_dec = (float)sprintf("%u", ip2long($lower));
                 $upper_dec = (float)sprintf("%u", ip2long($upper));
                 $ip_dec = (float)sprintf("%u", ip2long($ip));
@@ -235,19 +239,19 @@ class Util
     /**
      * @return string
      */
-    static function clientIp()
+    public static function clientIp(): string
     {
-        if ($_SERVER['HTTP_CLIENT_IP'])
+        if (!empty($_SERVER['HTTP_CLIENT_IP']))
             $ipAddress = $_SERVER['HTTP_CLIENT_IP'];
-        else if ($_SERVER['HTTP_X_FORWARDED_FOR'])
+        else if (!empty($_SERVER['HTTP_X_FORWARDED_FOR']))
             $ipAddress = $_SERVER['HTTP_X_FORWARDED_FOR'];
-        else if ($_SERVER['HTTP_X_FORWARDED'])
+        else if (!empty($_SERVER['HTTP_X_FORWARDED']))
             $ipAddress = $_SERVER['HTTP_X_FORWARDED'];
-        else if ($_SERVER['HTTP_FORWARDED_FOR'])
+        else if (!empty($_SERVER['HTTP_FORWARDED_FOR']))
             $ipAddress = $_SERVER['HTTP_FORWARDED_FOR'];
-        else if ($_SERVER['HTTP_FORWARDED'])
+        else if (!empty($_SERVER['HTTP_FORWARDED']))
             $ipAddress = $_SERVER['HTTP_FORWARDED'];
-        else if ($_SERVER['REMOTE_ADDR'])
+        else if (!empty($_SERVER['REMOTE_ADDR']))
             $ipAddress = $_SERVER['REMOTE_ADDR'];
         else
             $ipAddress = 'UNKNOWN';
@@ -255,13 +259,13 @@ class Util
     }
 
     /**
-     * @param $url
+     * @param string $url
      * @param int $connectTimeout
      * @param int $timeout
      * @return mixed
-     * @throws \Exception
+     * @throws Exception
      */
-    static function wget($url, $connectTimeout = 10, $timeout = 0)
+    public static function wget(string $url, int $connectTimeout = 10, int $timeout = 0)
     {
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "GET");
@@ -272,18 +276,22 @@ class Util
         $buffer = curl_exec($ch);
         curl_close($ch);
 
-        if (isset($buffer['curl_error'])) throw new \Exception($buffer['curl_error']);
-        if (isset($buffer['http_code']) && $buffer['http_code'] != '200') throw new \Exception("HTTP Code = " . $buffer['http_code']);
+        if (isset($buffer['curl_error'])) {
+            throw new Exception($buffer['curl_error']);
+        }
+        if (isset($buffer['http_code']) && $buffer['http_code'] != "200") {
+            throw new Exception("HTTP Code = " . $buffer['http_code']);
+        }
 
         return $buffer;
     }
 
     /**
-     * @param $url
+     * @param string $url
      * @param string $payload
      * @return bool
      */
-    static function asyncRequest($url, $payload = "")
+    public static function asyncRequest(string $url, string $payload = ""): bool
     {
         $cmd = "curl -XGET -H 'Content-Type: application/json'";
         $cmd .= " -d '" . $payload . "' " . "'" . $url . "'";
@@ -291,4 +299,73 @@ class Util
         exec($cmd, $output, $exit);
         return $exit == 0;
     }
+
+    /**
+     * @return string
+     */
+    public static function guid(): string
+    {
+        if (function_exists('com_create_guid') === true) {
+            return trim(com_create_guid(), '{}');
+        }
+
+        return sprintf('%04X%04X-%04X-%04X-%04X-%04X%04X%04X', mt_rand(0, 65535), mt_rand(0, 65535), mt_rand(0, 65535), mt_rand(16384, 20479), mt_rand(32768, 49151), mt_rand(0, 65535), mt_rand(0, 65535), mt_rand(0, 65535));
+    }
+
+    /**
+     *
+     */
+    public static function disableOb(): void
+    {
+        // Turn off output buffering
+        ini_set('output_buffering', 'off');
+        // Turn off PHP output compression
+        ini_set('zlib.output_compression', 'false');
+        // Implicitly flush the buffer(s)
+        ini_set('implicit_flush', 'true');
+        ob_implicit_flush(true);
+        // Clear, and turn off output buffering
+        while (ob_get_level() > 0) {
+            // Get the curent level
+            $level = ob_get_level();
+            // End the buffering
+            ob_end_clean();
+            // If the current level has not changed, abort
+            if (ob_get_level() == $level) break;
+        }
+    }
+
+    /**
+     * @param string $str
+     * @return string
+     */
+    public static function base64urlDecode(string $str): string
+    {
+        return base64_decode(str_replace(array('-', '_'), array('+', '/'), $str));
+    }
+
+    /**
+     * @param string $str
+     * @return string
+     */
+    public static function base64urlEncode(string $str): string
+    {
+        return rtrim(strtr(base64_encode($str), '+/', '-_'), '=');
+    }
+
+
+    /**
+     * @param string $sValue
+     * @param bool $bQuotes
+     * @return string
+     */
+    public static function format(string $sValue, bool $bQuotes = false): string
+    {
+        $sValue = trim($sValue);
+        if ($bQuotes xor get_magic_quotes_gpc()) {
+            $sValue = $bQuotes ? addslashes($sValue) : stripslashes($sValue);
+        }
+        return $sValue;
+    }
+
 }

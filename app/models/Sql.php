@@ -1,19 +1,29 @@
 <?php
 /**
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2021 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
  *
  */
 
 namespace app\models;
 
+use app\conf\App;
+use app\conf\Connection;
+use app\inc\Model;
+use Exception;
+use PDOException;
+use PHPExcel_Reader_CSV;
+use PHPExcel_Writer_Excel2007;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
+use ZipArchive;
+
 
 /**
  * Class Sql
  * @package app\models
  */
-class Sql extends \app\inc\Model
+class Sql extends Model
 {
     /**
      * @var string
@@ -32,27 +42,76 @@ class Sql extends \app\inc\Model
 
     /**
      * @param string $q
-     * @param null $clientEncoding
-     * @param string $format
-     * @param string $geoformat
-     * @param bool $csvAllToStr
-     * @param null $aliasesFrom
-     * @return mixed
+     * @param string|null $clientEncoding
+     * @param string|null $format
+     * @param string|null $geoformat
+     * @param bool|null $csvAllToStr
+     * @param string|null $aliasesFrom
+     * @param null $nlt
+     * @param null $nln
+     * @return array<mixed>
+     * @throws PhpfastcacheInvalidArgumentException
      */
-    public function sql($q, $clientEncoding = null, $format = "geojson", $geoformat = "wkt", $csvAllToStr = false, $aliasesFrom = null)
+    public function sql(string $q, ?string $clientEncoding = null, ?string $format = "geojson", ?string $geoformat = "wkt", ?bool $csvAllToStr = false, ?string $aliasesFrom = null, $nlt = null, $nln = null): array
     {
         if ($format == "excel") {
-            $limit = 10000;
+            $limit = !empty(App::$param["limits"]["sqlExcel"]) ? App::$param["limits"]["sqlExcel"] : 10000;
         } else {
-            $limit = 100000;
+            $limit = !empty(App::$param["limits"]["sqlJson"]) ? App::$param["limits"]["sqlJson"] : 100000;
         }
         $name = "_" . rand(1, 999999999) . microtime();
-        $view = $this->toAscii($name, null, "_");
+        $view = self::toAscii($name, null, "_");
+        $formatSplit = explode("/", $format);
+        if (sizeof($formatSplit) == 2 && $formatSplit[0] == "ogr") {
+            $fileOrFolder = $nln ?: $view;
+            $fileOrFolder .= "." . self::toAscii($formatSplit[1], null, "_");
+            $path = App::$param['path'] . "app/tmp/" . Connection::$param["postgisdb"] . "/__vectors/" . $fileOrFolder;
+            $cmd = "ogr2ogr " .
+                "-f \"" . explode("/", $format)[1] . "\" " . $path . " " .
+                "-t_srs \"EPSG:" . $this->srs . "\" " .
+                "-a_srs \"EPSG:" . $this->srs . "\" " .
+                ($nlt ? "-nlt " . $nlt . " " : "") .
+                ($nln ? "-nln " . $nln . " " : "") .
+                "-preserve_fid " .
+                "PG:'host=" . Connection::$param["postgishost"] . " user=" . Connection::$param["postgisuser"] . " password=" . Connection::$param["postgispw"] . " dbname=" . Connection::$param["postgisdb"] . "' " .
+                "-sql \"" . $q . "\"";
+//            die($cmd);
+            exec($cmd . ' 2>&1', $out, $err);
+            if ($out) {
+                foreach ($out as $str) {
+                    if (strpos($str, 'ERROR') !== false) {
+                        return [
+                            'success' => false,
+                            "message" => $out,
+                            "code" => 440,
+                        ];
+                    }
+                }
+            }
+            $zip = new ZipArchive();
+            $zipPath = $path . ".zip";
+            if ($zip->open($zipPath, ZIPARCHIVE::CREATE) != TRUE) {
+                error_log("Could not open ZIP archive");
+            }
+            if (is_dir($path)) {
+                $zip->addGlob($path . "/*", 0, ["remove_all_path" => true]);
+            } else {
+                $zip->addFile($path, $fileOrFolder);
+            }
+            if ($zip->status != ZIPARCHIVE::ER_OK) {
+                error_log("Failed to write files to zip archive");
+            }
+            $zip->close();
+            header("Content-type: application/zip, application/octet-stream");
+            header("Content-Disposition: attachment; filename=\"{$fileOrFolder}.zip\"");
+            readfile($zipPath);
+            exit(0);
+        }
         $sqlView = "CREATE TEMPORARY VIEW {$view} as {$q}";
         $res = $this->prepare($sqlView);
         try {
             $res->execute();
-        } catch (\PDOException $e) {
+        } catch (PDOException $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
             $response['code'] = 400;
@@ -61,12 +120,11 @@ class Sql extends \app\inc\Model
         $arrayWithFields = $this->getMetaData($view, true); // Temp VIEW
         $postgisVersion = $this->postgisVersion();
         $bits = explode(".", $postgisVersion["version"]);
-        if ((int)$bits[1] > 0) {
-            $ST_Force2D = "ST_Force2D";
+        if ((int)$bits[0] < 3 && (int)$bits[1] === 0) {
+            $ST_Force2D = "ST_Force_2D"; // In case of PostGIS 2.0.x
         } else {
-            $ST_Force2D = "ST_Force_2D";
+            $ST_Force2D = "ST_Force2D";
         }
-
         $fieldsArr = [];
         foreach ($arrayWithFields as $key => $arr) {
             if ($arr['type'] == "geometry") {
@@ -75,11 +133,9 @@ class Sql extends \app\inc\Model
                 } elseif ($format == "csv" || $format == "excel") {
                     $fieldsArr[] = "ST_asText(ST_Transform({$ST_Force2D}(\"" . $key . "\")," . $this->srs . ")) as \"" . $key . "\"";
                 }
-            }
-            elseif ($arr['type'] == "bytea") {
+            } elseif ($arr['type'] == "bytea") {
                 $fieldsArr[] = "encode(\"" . $key . "\",'escape') as \"" . $key . "\"";
-            }
-            else {
+            } else {
                 $fieldsArr[] = "\"{$key}\"";
             }
         }
@@ -87,14 +143,24 @@ class Sql extends \app\inc\Model
         $sql = "SELECT {$sql} FROM {$view} LIMIT {$limit}";
 
         $this->begin();
-        $this->execQuery('SET LOCAL statement_timeout = 60000');
+
+        // Settings from App.php
+        if (!empty(App::$param["SqlApiSettings"]["work_mem"])) {
+            $this->execQuery("SET work_mem TO '" . App::$param["SqlApiSettings"]["work_mem"] . "'");
+        }
+        if (!empty(App::$param["SqlApiSettings"]["statement_timeout"])) {
+            $this->execQuery("SET LOCAL statement_timeout = " . (string)App::$param["SqlApiSettings"]["statement_timeout"]);
+        } else {
+            $this->execQuery("SET LOCAL statement_timeout = 60000");
+        }
+
         if ($clientEncoding) {
-            $this->execQuery("set client_encoding='{$clientEncoding}'", "PDO");
+            $this->execQuery("set client_encoding='{$clientEncoding}'");
         }
         try {
             $result = $this->prepare($sql);
             $result->execute();
-        } catch (\PDOException $e) {
+        } catch (PDOException $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
             $response['code'] = 410;
@@ -102,7 +168,7 @@ class Sql extends \app\inc\Model
         }
         $this->commit();
 
-        $geometries = [];
+        $geometries = null;
         $fieldsForStore = [];
         $columnsForGrid = [];
         $features = [];
@@ -112,7 +178,7 @@ class Sql extends \app\inc\Model
 
         if ($format == "geojson") {
             try {
-                while ($row = $this->fetchRow($result, "assoc")) {
+                while ($row = $this->fetchRow($result)) {
                     $arr = array();
                     foreach ($row as $key => $value) {
                         if ($arrayWithFields[$key]['type'] == "geometry") {
@@ -123,18 +189,16 @@ class Sql extends \app\inc\Model
                             $arr = $this->array_push_assoc($arr, $key, $value);
                         }
                     }
-                    if (sizeof($geometries) > 1) {
-                        $features[] = array("geometry" => array("type" => "GeometryCollection", "geometries" => $geometries), "type" => "Feature", "properties" => $arr);
-                    }
-                    if (sizeof($geometries) == 1) {
-                        $features[] = array("geometry" => $geometries[0], "type" => "Feature", "properties" => $arr);
-                    }
-                    if (sizeof($geometries) == 0) {
+                    if ($geometries == null) {
                         $features[] = array("type" => "Feature", "properties" => $arr);
+                    } elseif (count($geometries) == 1) {
+                        $features[] = array("type" => "Feature", "geometry" => $geometries[0], "properties" => $arr);
+                    } else {
+                        $features[] = array("type" => "Feature", "properties" => $arr, "geometry" => array("type" => "GeometryCollection", "geometries" => $geometries));
                     }
-                    unset($geometries);
+                    $geometries = null;
                 }
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 $response['success'] = false;
                 $response['message'] = $e->getMessage();
                 $response['code'] = 410;
@@ -142,11 +206,8 @@ class Sql extends \app\inc\Model
             }
             foreach ($arrayWithFields as $key => $value) {
                 $fieldsForStore[] = array("name" => $key, "type" => $value['type']);
-                $columnsForGrid[] = array("header" => $key, "dataIndex" => $key, "type" => $value['type'], "typeObj" => $value['typeObj']);
+                $columnsForGrid[] = array("header" => $key, "dataIndex" => $key, "type" => $value['type'], "typeObj" => !empty($value['typeObj']) ? $value['typeObj'] : null);
             }
-            $this->free($result);
-            $sql = "DROP VIEW {$view}";
-            $result = $this->execQuery($sql);
             $this->free($result);
             $response['success'] = true;
             $response['forStore'] = $fieldsForStore;
@@ -171,7 +232,7 @@ class Sql extends \app\inc\Model
             }
 
             try {
-                while ($row = $this->fetchRow($result, "assoc")) {
+                while ($row = $this->fetchRow($result)) {
                     $arr = array();
                     $fields = array();
 
@@ -215,20 +276,20 @@ class Sql extends \app\inc\Model
                 // ================
 
                 if ($format == "excel") {
-                    include '../app/vendor/phpoffice/phpexcel/Classes/PHPExcel/IOFactory.php';
+                    include __DIR__ . '../vendor/phpoffice/phpexcel/Classes/PHPExcel/IOFactory.php';
                     $file = tempnam(sys_get_temp_dir(), 'excel_');
                     $handle = fopen($file, "w");
                     fwrite($handle, $csv);
                     $csv = null;
 
-                    $objReader = new \PHPExcel_Reader_CSV();
+                    $objReader = new PHPExcel_Reader_CSV();
                     $objReader->setDelimiter($separator);
                     $objPHPExcel = $objReader->load($file);
 
                     fclose($handle);
                     unlink($file);
 
-                    $objWriter = new \PHPExcel_Writer_Excel2007($objPHPExcel);
+                    $objWriter = new PHPExcel_Writer_Excel2007($objPHPExcel);
 
                     // We'll be outputting an excel file
                     header('Content-type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -240,23 +301,27 @@ class Sql extends \app\inc\Model
                     $objWriter->save('php://output');
                     die();
                 }
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 $response['success'] = false;
                 $response['message'] = $e->getMessage();
                 $response['code'] = 410;
                 return $response;
             }
             $this->free($result);
+            $response['success'] = true;
             $response['csv'] = $csv;
             return $response;
         }
+        return [
+            "success" => false,
+        ];
     }
 
     /**
-     * @param $q
-     * @return mixed
+     * @param string $q
+     * @return array<mixed>
      */
-    public function transaction($q)
+    public function transaction(string $q): array
     {
         $result = $this->execQuery($q, "PDO", "transaction");
         if (!$this->PDOerror) {
@@ -270,7 +335,13 @@ class Sql extends \app\inc\Model
         return $response;
     }
 
-    private function array_push_assoc($array, $key, $value)
+    /**
+     * @param array<mixed> $array
+     * @param string $key
+     * @param mixed $value
+     * @return array<mixed>
+     */
+    private function array_push_assoc(array $array, string $key, $value): array
     {
         $array[$key] = $value;
         return $array;

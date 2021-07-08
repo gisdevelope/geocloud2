@@ -58,7 +58,7 @@ class Classification extends \app\inc\Model
             $row = $this->fetchRow($result, "assoc");
             $arr = $arr2 = (array)json_decode($row['class']);
             for ($i = 0; $i < sizeof($arr); $i++) {
-                $last = 100;
+                $last = 10000;
                 foreach ($arr2 as $key => $value) {
                     if ($value->sortid < $last) {
                         $temp = $value;
@@ -123,14 +123,12 @@ class Classification extends \app\inc\Model
 
     private function store($data)
     {
-        // First we replace unicode escape sequence
-        //$data = preg_replace_callback('/\\\\u([0-9a-f]{4})/i', 'replace_unicode_escape_sequence', $data);
         $tableObj = new Table("settings.geometry_columns_join");
         $obj = new \stdClass;
         $obj->class = $data;
         $obj->_key_ = $this->layer;
         $tableObj->updateRecord($obj, "_key_");
-        if (!$tableObj->PDOerror) {
+        if (empty($tableObj->PDOerror)) {
             $response = true;
         } else {
             $response = false;
@@ -140,14 +138,12 @@ class Classification extends \app\inc\Model
 
     private function storeWizard($data)
     {
-        // First we replace unicode escape sequence
-        //$data = preg_replace_callback('/\\\\u([0-9a-f]{4})/i', 'replace_unicode_escape_sequence', $data);
         $tableObj = new Table("settings.geometry_columns_join");
         $obj = new \stdClass;
         $obj->classwizard = $data;
         $obj->_key_ = $this->layer;
         $tableObj->updateRecord($obj, "_key_");
-        if (!$tableObj->PDOerror) {
+        if (empty($tableObj->PDOerror)) {
             $response = true;
         } else {
             $response = false;
@@ -226,7 +222,7 @@ class Classification extends \app\inc\Model
             return $response;
         }
         $def["data"][0]["cluster"] = null;
-        $defJson = json_encode($def["data"][0],JSON_UNESCAPED_UNICODE);
+        $defJson = json_encode($def["data"][0], JSON_UNESCAPED_UNICODE);
         $res = $this->tile->update($defJson);
         if (!$res['success']) {
             $response['success'] = false;
@@ -503,7 +499,7 @@ class Classification extends \app\inc\Model
             return $response;
         }
         //Set single class
-        if (\app\conf\App::$param["mapserver_ver_7"]){
+        if (\app\conf\App::$param["mapserver_ver_7"]) {
             $ClusterFeatureCount = "Cluster_FeatureCount";
         } else {
             $ClusterFeatureCount = "Cluster:FeatureCount";
@@ -542,15 +538,16 @@ class Classification extends \app\inc\Model
         }
         $response['success'] = true;
         $response['message'] = "Updated 2 classes";
-        $this->storeWizard(json_encode($data,JSON_UNESCAPED_UNICODE));
+        $this->storeWizard(json_encode($data, JSON_UNESCAPED_UNICODE));
         return $response;
     }
 
-    public function copyClasses($to, $from) {
+    public function copyClasses($to, $from)
+    {
         $query = "SELECT class FROM settings.geometry_columns_join WHERE _key_ =:from";
         $res = $this->prepare($query);
         try {
-            $res->execute(array("from"=>$from));
+            $res->execute(array("from" => $from));
         } catch (\PDOException $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
@@ -563,7 +560,7 @@ class Classification extends \app\inc\Model
 
 
         $geometryColumnsObj = new table("settings.geometry_columns_join");
-        $res = $geometryColumnsObj->updateRecord(json_decode(json_encode($conf,JSON_UNESCAPED_UNICODE)), "_key_");
+        $res = $geometryColumnsObj->updateRecord(json_decode(json_encode($conf, JSON_UNESCAPED_UNICODE)), "_key_");
         if (!$res["success"]) {
             $response['success'] = false;
             $response['message'] = $res["message"];
@@ -588,30 +585,30 @@ class Classification extends \app\inc\Model
             "sortid" => $sortid,
             "name" => $name,
             "expression" => $expression,
-            "label" => ($data->labelText) ? true : false,
-            "label_size" => ($data->labelSize) ?: "",
-            "label_color" => ($data->labelColor) ?: "",
+            "label" => !empty($data->labelText) ? true : false,
+            "label_size" => !empty($data->labelSize) ? $data->labelSize : "",
+            "label_color" => !empty($data->labelColor) ? $data->labelColor : "",
             "color" => $color,
-            "outlinecolor" => ($outlineColor) ?: "",
-            "style_opacity" => ($data->opacity) ?: "",
+            "outlinecolor" => !empty($outlineColor) ? $outlineColor : "",
+            "style_opacity" => !empty($data->opacity) ? $data->opacity : "",
             "symbol" => $symbol,
-            "angle" => ($data->angle) ?: "",
+            "angle" => !empty($data->angle) ? $data->angle : "",
             "size" => $size,
-            "width" => ($data->lineWidth) ?: "",
-            "overlaycolor" => ($data->overlayColor) ?: "",
+            "width" => !empty($data->lineWidth) ? $data->lineWidth : "",
+            "overlaycolor" => !empty($data->overlayColor) ? $data->overlayColor : "",
             "overlayoutlinecolor" => "",
-            "overlaysymbol" => ($data->overlaySymbol) ?: "",
-            "overlaysize" => ($data->overlaySize) ?: "",
+            "overlaysymbol" => !empty($data->overlaySymbol) ? $data->overlaySymbol : "",
+            "overlaysize" => !empty($data->overlaySize) ? $data->overlaySize : "",
             "overlaywidth" => "",
-            "label_text" => ($data->labelText) ?: "",
-            "label_position" => ($data->labelPosition) ?: "",
-            "label_font" => ($data->labelFont) ?: "",
-            "label_fontweight" => ($data->labelFontWeight) ?: "",
-            "label_angle" => ($data->labelAngle) ?: "",
-            "label_backgroundcolor" => ($data->labelBackgroundcolor) ?: "",
-            "style_opacity" => ($data->opacity) ?: "",
-            "overlaystyle_opacity" => ($data->overlayOpacity) ?: "",
-            "label_force" => ($data->force) ?: "",
+            "label_text" => !empty($data->labelText) ? $data->labelText : "",
+            "label_position" => !empty($data->labelPosition) ? $data->labelPosition : "",
+            "label_font" => !empty($data->labelFont) ? $data->labelFont : "",
+            "label_fontweight" => !empty($data->labelFontWeight) ? $data->labelFontWeight : "",
+            "label_angle" => !empty($data->labelAngle) ? $data->labelAngle : "",
+            "label_backgroundcolor" => !empty($data->labelBackgroundcolor) ? $data->labelBackgroundcolor : "",
+            "style_opacity" => !empty($data->opacity) ? $data->opacity : "",
+            "overlaystyle_opacity" => !empty($data->overlayOpacity) ? $data->overlayOpacity : "",
+            "label_force" => !empty($data->force) ? $data->force : "",
         );
     }
 }

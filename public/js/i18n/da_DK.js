@@ -83,6 +83,7 @@ gc2i18n = {
         "Database": "Database",
         "Created": "Skabt",
         "Geom field": "Geom felt",
+        "Dimensions": "Dimensioner",
         "Last modified": "Senest ændret",
         "Classes": "Klasser",
         "Style is updated": "Stil er opdateret",
@@ -201,6 +202,7 @@ gc2i18n = {
         "Copy all properties from another layer": "Kopier egenskaber fra et andet lag",
         "Layer properties copied": "Egenskaber er kopieret",
         "Enable filtering": "Aktiver filtrering",
+        "Disable filtering": "Deaktiver filtrering",
         "Show in conflict": "Vis i konflikt",
         "Make link": "Gør til link",
         "Show in click info": "Vis i klik-info",
@@ -227,6 +229,11 @@ gc2i18n = {
         "This will create one new composite layer with all layers in the GGIS project. Blending mode from QGIS will be used. This is great for creating a base layer. The new layer will take name from the qgs-file and be placed in the current schema": "Dette vil oprette et nyt composite lag med alle lag fra QGIS projektet. Blending mode vil blive anvendt. Dette kan bruges til at skabe et baggrundskort. Det nye lag vil tage navn fra qgs-filen og blive placeret i nuværende schema.",
 
         "Append" : "Tilføj",
-        "Write tag names into the field 'Tags'. Finish the tag name with an 'Enter' key stroke. If 'Append' is checked, new tags are appended to existing one. Append is only available when multiple layers are selected.": "Skriv tag-navne i feltet 'Tags'. Afslut tag-navnet ved at taste 'Enter'. Hvis 'Tilføj' er tjekket af, tilføjes nye tags til eksisterende. 'Tilføj' er kun tilgængelig, når flere lag er valgt."
+        "Write tag names into the field 'Tags'. Finish the tag name with an 'Enter' key stroke. If 'Append' is checked, new tags are appended to existing one. Append is only available when multiple layers are selected.": "Skriv tag-navne i feltet 'Tags'. Afslut tag-navnet ved at taste 'Enter'. Hvis 'Tilføj' er tjekket af, tilføjes nye tags til eksisterende. 'Tilføj' er kun tilgængelig, når flere lag er valgt.",
+
+        "Change between WMS and Tile Cache": "Skift mellem WMS og Tile Cache",
+
+        "Structure": "Struktur",
+        "Update SQL": "Opdater SQL"
     }
 };

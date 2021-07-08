@@ -1,11 +1,39 @@
 {
+    "scripts": {
+        "test": "./vendor/bin/codecept run api",
+        "build:documentation": "./vendor/bin/openapi --output ../public/swagger-ui/api.json api/v2"
+    },
     "require": {
         "wildbit/postmark-php": "^2.2",
         "odesk/phystrix": "^2.0",
-        "PHPOffice/PHPExcel": "^1.8",
-        "phayes/geoPHP": "^1.2"
+        "phpoffice/phpexcel": "^1.8",
+        "phayes/geophp": "^1.2",
+        "phpfastcache/phpfastcache": "^8.0",
+        "zircote/swagger-php": "^3.0",
+        "firebase/php-jwt": "^5.0",
+        "predis/predis": "^1.1",
+        "league/flysystem": "^1.0",
+        "league/flysystem-aws-s3-v3": "^1.0",
+        "guzzlehttp/guzzle": "^6.5",
+        "ext-pdo": "*",
+        "ext-json": "*",
+        "ext-pgsql": "*",
+        "ext-iconv": "*",
+        "ext-curl": "*",
+        "ext-simplexml": "*",
+        "ext-xml": "*",
+        "ext-zip": "*",
+        "ext-zlib": "*",
+        "peppeocchi/php-cron-scheduler": "^3.1",
+        "sad_spirit/pg_builder": "v1.0.0-beta",
+        "ext-gd": "*"
     },
     "require-dev": {
-        "codeception/codeception": "^2.3"
+        "codeception/module-asserts": "^1.3",
+        "codeception/module-rest": "^1.2",
+        "codeception/module-phpbrowser": "^1.0",
+        "codeception/codeception": "^4.1",
+        "phpstan/phpstan": "^0.12.63",
+        "phpmd/phpmd": "^2.9"
     }
 }

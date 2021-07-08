@@ -83,6 +83,7 @@ gc2i18n = {
         "Database": "Database",
         "Created": "Created",
         "Geom field": "Geom field",
+        "Dimensions": "Dimensions",
         "Last modified": "Last modified",
         "Classes": "Classes",
         "Style is updated": "Style is updated",
@@ -201,6 +202,7 @@ gc2i18n = {
         "Copy all properties from another layer": "Copy all properties from another layer",
         "Layer properties copied": "Layer properties copied",
         "Enable filtering": "Enable filtering",
+        "Disable filtering": "Disable filtering",
         "Show in conflict": "Show in conflict",
         "Make link": "Make link",
         "Show in click info": "Show in click info",
@@ -227,6 +229,11 @@ gc2i18n = {
         "This will create one new composite layer with all layers in the GGIS project. Blending mode from QGIS will be used. This is great for creating a base layer. The new layer will take name from the qgs-file and be placed in the current schema": "This will create one new composite layer with all layers in the GGIS project. Blending mode from QGIS will be used. This is great for creating a base layer. The new layer will take name from the qgs-file and be placed in the current schema",
 
         "Append": "Append",
-        "Write tag names into the field 'Tags'. Finish the tag name with an 'Enter' key stroke. If 'Append' is checked, new tags are appended to existing one. Append is only availably when mulitple layers are selected.": "Write tag names into the field 'Tags'. Finish the tag name with an 'Enter' key stroke. If 'Append' is checked, new tags are appended to existing one. Append is only availably when mulitple layers are selected."
+        "Write tag names into the field 'Tags'. Finish the tag name with an 'Enter' key stroke. If 'Append' is checked, new tags are appended to existing one. Append is only availably when mulitple layers are selected.": "Write tag names into the field 'Tags'. Finish the tag name with an 'Enter' key stroke. If 'Append' is checked, new tags are appended to existing one. Append is only availably when mulitple layers are selected.",
+
+        "Change between WMS and Tile Cache": "Change between single WMS and Tile Cache",
+
+        "Structure": "Structure",
+        "Update SQL": "Update SQL"
     }
 };

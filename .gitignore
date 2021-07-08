@@ -3,13 +3,15 @@ app/conf/Connection.php
 app/conf/secret.key
 app/conf/public.key
 app/conf/elasticsearch_settings.json
-app/conf/wfsprocessors/classes
+app/wfs/processors/classes
 app/tmp/
 app/wms/mapfiles
 app/wms/mapcache
 app/wms/qgsfiles
 app/vendor
 app/libs/vendor
+app/tests/_output
+app/tests/_output/*
 node_modules
 public/backups
 public/logs
@@ -48,5 +50,5 @@ Thumbs.db
 apasswords
 #/app/composer.lock
 #/app/composer.phar
-#/app/conf/wfsprocessors/classes/pre/Pre_fot5.php
+#/app/conf/processors/classes/pre/Pre_fot5.php
 /public/apps/widgets/gc2map/config/config.js
