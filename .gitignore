@@ -3,14 +3,18 @@ app/conf/Connection.php
 app/conf/secret.key
 app/conf/public.key
 app/conf/elasticsearch_settings.json
-app/conf/wfsprocessors/classes
+app/wfs/processors/classes
 app/tmp/
 app/wms/mapfiles
 app/wms/mapcache
 app/wms/qgsfiles
 app/vendor
 app/libs/vendor
+app/tests/_output
+app/tests/_output/*
+app/composer.phar
 node_modules
+sbom/config/node_modules/
 public/backups
 public/logs
 public/scheduler/.sencha
@@ -46,7 +50,40 @@ Vagrantfile
 ehthumbs.db
 Thumbs.db
 apasswords
-#/app/composer.lock
-#/app/composer.phar
-#/app/conf/wfsprocessors/classes/pre/Pre_fot5.php
 /public/apps/widgets/gc2map/config/config.js
+
+# Added for devcontainers
+public/css
+public/apps/viewer/css
+public/apps/viewer/js
+public/apps/widgets/gc2map/css
+public/apps/widgets/gc2map/js
+public/api
+admin.php
+/public/dashboard
+
+# Python virtualenv (repo root)
+/venv/
+/bin/
+/lib64
+
+# Build artifacts
+dashboard/build/
+docs/_build/
+public/js/admin/build/
+
+# Runtime / process files
+/supervisord.log
+/supervisord.pid
+
+# WSL / Windows download metadata
+*:Zone.Identifier
+
+# Go function-runner build artifact
+/function-runner/gc2-function-runner
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+vendor/ERDAS-ECW_JPEG_2000_SDK-*

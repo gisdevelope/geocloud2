@@ -75,6 +75,7 @@ gc2i18n = {
         "Only read": "Only read",
         "Read and write": "Read and write",
         "All": "All",
+        "Multiple layers are selected. Any changes will effect all selected layers.": "Multiple layers are selected. Any changes will effect all selected layers.",
         "The layer doesn't exist for the sub-user.": "The layer doesn't exist for the sub-user.",
         "The sub-user can see and query the layer.": "The sub-user can see and query the layer.",
         "The sub-user can edit the layer.": "The sub-user can edit the layer.",
@@ -83,6 +84,7 @@ gc2i18n = {
         "Database": "Database",
         "Created": "Created",
         "Geom field": "Geom field",
+        "Dimensions": "Dimensions",
         "Last modified": "Last modified",
         "Classes": "Classes",
         "Style is updated": "Style is updated",
@@ -195,16 +197,22 @@ gc2i18n = {
         "Layer tree reloaded": "Layer tree reloaded",
 
         "Select a layer from which you want to copy the classes": "Select a layer from which you want to copy the classes",
+        "Copy": "Copy",
         "Copy from": "Copy from",
+        "What to copy": "What to copy",
+        "All on": "All on",
+        "All off": "All off",
         "Add": "Add",
         "Copy properties": "Copy properties",
         "Copy all properties from another layer": "Copy all properties from another layer",
         "Layer properties copied": "Layer properties copied",
         "Enable filtering": "Enable filtering",
+        "Disable filtering": "Disable filtering",
         "Show in conflict": "Show in conflict",
         "Make link": "Make link",
         "Show in click info": "Show in click info",
         "No layers": "No layers",
+        "Disable export": "Disable export",
 
         "Search anything": "Search anything",
         "Update on movement": "Update on movement",
@@ -227,6 +235,20 @@ gc2i18n = {
         "This will create one new composite layer with all layers in the GGIS project. Blending mode from QGIS will be used. This is great for creating a base layer. The new layer will take name from the qgs-file and be placed in the current schema": "This will create one new composite layer with all layers in the GGIS project. Blending mode from QGIS will be used. This is great for creating a base layer. The new layer will take name from the qgs-file and be placed in the current schema",
 
         "Append": "Append",
-        "Write tag names into the field 'Tags'. Finish the tag name with an 'Enter' key stroke. If 'Append' is checked, new tags are appended to existing one. Append is only availably when mulitple layers are selected.": "Write tag names into the field 'Tags'. Finish the tag name with an 'Enter' key stroke. If 'Append' is checked, new tags are appended to existing one. Append is only availably when mulitple layers are selected."
+        "Write tag names into the field 'Tags'. Finish the tag name with an 'Enter' key stroke. If 'Append' is checked, new tags are appended to existing one. Append is only availably when mulitple layers are selected.": "Write tag names into the field 'Tags'. Finish the tag name with an 'Enter' key stroke. If 'Append' is checked, new tags are appended to existing one. Append is only availably when mulitple layers are selected.",
+
+        "Change between WMS and Tile Cache": "Change between single WMS and Tile Cache",
+
+        "Structure": "Structure",
+        "Update SQL": "Update SQL",
+        "Ignore": "Ignore",
+        "Content": "Content",
+        "No tags": "No tags",
+
+        "You are no longer logged in to GC2. Close or refresh your browser": "You are no longer logged in to GC2. Close or refresh your browser",
+        "You have started Admin for another schema. Either close this here or refresh your browser": "You have started Admin for another schema. Either close this here or refresh your browser",
+        "Something went wrong. Try refreshing your browser": "Something went wrong. Try refreshing your browser",
+
+        "Enable workflow on": "Enable workflow on"
     }
 };

@@ -105,14 +105,14 @@ geocloud = (function () {
         visibility: true,
         lifetime: 0,
         host: host,
-        uri: "/api/v1/sql",
+        uri: "/api/v2/sql",
         db: null,
         sql: null,
         q: null,
         name: "Vector",
         id: null,
         rendererOptions: {zIndexing: true},
-        projection: (MAPLIB === "leaflet") ? "4326" : "900913",
+        projection: (MAPLIB === "leaflet") ? "4326" : "3857",
         //Only leaflet
         pointToLayer: function (feature, latlng) {
             return L.circleMarker(latlng);
@@ -129,7 +129,7 @@ geocloud = (function () {
         size: 100,
         clientEncoding: "UTF8",
         async: true,
-        jsonp: true,
+        jsonp: false,
         method: "GET",
         clickable: true,
         error: function () {
@@ -653,7 +653,7 @@ geocloud = (function () {
         var prop, lControl, queryLayers = [],
             defaults = {
                 numZoomLevels: 20,
-                projection: "EPSG:900913",
+                projection: "EPSG:3857",
                 fadeAnimation: true,
                 zoomAnimation: true,
                 showLayerSwitcher: false,
@@ -702,8 +702,8 @@ geocloud = (function () {
                         this.map.fitWorld();
                     }
                     else {
-                        p1 = transformPoint(extent[0], extent[1], "EPSG:900913", "EPSG:4326");
-                        p2 = transformPoint(extent[2], extent[3], "EPSG:900913", "EPSG:4326");
+                        p1 = transformPoint(extent[0], extent[1], "EPSG:3857", "EPSG:4326");
+                        p2 = transformPoint(extent[2], extent[3], "EPSG:3857", "EPSG:4326");
                         this.map.fitBounds([
                             [p1.y, p1.x],
                             [p2.y, p2.x]
@@ -891,7 +891,7 @@ geocloud = (function () {
             return p;
         };
         //ol2, ol3 and leaflet
-        // Input map coordinates (900913)
+        // Input map coordinates (3857)
         this.zoomToPoint = function (x, y, r) {
             switch (MAPLIB) {
                 case "ol2":
@@ -904,7 +904,7 @@ geocloud = (function () {
                     this.map.getView().setResolution(resolution);
                     break;
                 case "leaflet":
-                    var p = transformPoint(x, y, "EPSG:900913", "EPSG:4326");
+                    var p = transformPoint(x, y, "EPSG:3857", "EPSG:4326");
                     this.map.setView([p.y, p.x], r);
                     break;
             }
@@ -1297,7 +1297,7 @@ geocloud = (function () {
         //ol2 and leaflet
         this.addDtkSkaermkort = function (name, layer) {
             var l,
-                url = "http://cdn.eu1.mapcentia.com/wms/dk/tilecache/";
+                url = "https://dk.gc2.io/mapcache/baselayers/tms";
 
             switch (MAPLIB) {
                 case "ol2":
@@ -1680,16 +1680,16 @@ geocloud = (function () {
                     o = this.addYandex("publicMapHybrid");
                     break;
                 case "dtkSkaermkort":
-                    o = this.addDtkSkaermkort("dtkSkaermkort", "dtk_skaermkort");
+                    o = this.addDtkSkaermkort("dtkSkaermkort", "kortforsyningen.dtk_skaermkort");
                     break;
                 case "dtkSkaermkortDaempet":
-                    o = this.addDtkSkaermkort("dtkSkaermkortDaempet", "dtk_skaermkort_daempet");
+                    o = this.addDtkSkaermkort("dtkSkaermkortDaempet", "kortforsyningen.dtk_skaermkort_daempet");
                     break;
                 case "dtkSkaermkort@25832":
                     o = this.addDtkSkaermkortUtm("dtkSkaermkort@25832", "dtk_skaermkort");
                     break;
                 case "dtkSkaermkortDaempet@25832":
-                    o = this.addDtkSkaermkortUtm("dtkSkaermkortDaempet@25832", "dtk_skaermkort_daempet");
+                    o = this.addDtkSkaermkortUtm("dtkSkaermkortDaempet@25832", "kortforsyningen.dtk_skaermkort_daempet");
                     break;
                 case "geodkBright":
                     o = this.addGeoDk("geodkBright", "geodk.bright");
@@ -1923,7 +1923,7 @@ geocloud = (function () {
             }
         };
         //ol2, ol3 and leaflet
-        // Output map coordinates (900913)
+        // Output map coordinates (3857)
         this.getCenter = function () {
             var point;
             switch (MAPLIB) {
@@ -1943,7 +1943,7 @@ geocloud = (function () {
                     break;
                 case "leaflet":
                     point = this.map.getCenter();
-                    var p = transformPoint(point.lng, point.lat, "EPSG:4326", "EPSG:900913");
+                    var p = transformPoint(point.lng, point.lat, "EPSG:4326", "EPSG:3857");
                     return {
                         x: p.x,
                         y: p.y,
@@ -2003,7 +2003,7 @@ geocloud = (function () {
                         });
                         geometry = features.geometry.transform(
                             new OpenLayers.Projection('EPSG:4326'),
-                            new OpenLayers.Projection('EPSG:900913')
+                            new OpenLayers.Projection('EPSG:3857')
                         );
                         transformedFeature = new OpenLayers.Feature.Vector(geometry, {});
                         queryLayers[i].addFeatures([transformedFeature]);
@@ -2097,7 +2097,7 @@ geocloud = (function () {
         };
     };
 // ol2, ol3 and leaflet
-// Input map coordinates (900913)
+// Input map coordinates (3857)
     clickEvent = function (e, map) {
         this.getCoordinate = function () {
             var point;
@@ -2118,7 +2118,7 @@ geocloud = (function () {
                     break;
                 case "leaflet":
                     point = e.latlng;
-                    var p = transformPoint(point.lng, point.lat, "EPSG:4326", "EPSG:900913");
+                    var p = transformPoint(point.lng, point.lat, "EPSG:4326", "EPSG:3857");
                     return {
                         x: p.x,
                         y: p.y

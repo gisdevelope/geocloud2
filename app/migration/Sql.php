@@ -1,0 +1,594 @@
+<?php
+/**
+ * @author     Martin Høgh <mh@mapcentia.com>
+ * @copyright  2013-2025 MapCentia ApS
+ * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
+ *
+ */
+
+namespace app\migration;
+
+use app\conf\App;
+
+/**
+ * Class Sql
+ * @package app\conf\migration
+ */
+class Sql
+{
+    /**
+     * @return array<string>
+     */
+    public static function get(): array
+    {
+        $sqls[] = "DROP VIEW settings.geometry_columns_view CASCADE";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN filter TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN cartomobile TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN bitmapsource VARCHAR(255)";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ALTER data TYPE TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN privileges TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ALTER sort_id SET DEFAULT 0";
+        $sqls[] = "UPDATE settings.geometry_columns_join SET sort_id = 0 WHERE sort_id IS NULL";
+        $sqls[] = "CREATE EXTENSION \"uuid-ossp\"";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join DROP f_table_schema";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join DROP f_table_name";
+        $sqls[] = "CREATE EXTENSION \"hstore\"";
+        $sqls[] = "CREATE EXTENSION \"dblink\"";
+        $sqls[] = "CREATE EXTENSION \"pgcrypto\"";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD PRIMARY KEY (_key_)";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN classwizard TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN enablesqlfilter BOOL";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ALTER enablesqlfilter SET DEFAULT FALSE";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN triggertable VARCHAR(255)";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN classwizard TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN extra TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD skipconflict BOOL DEFAULT FALSE";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ALTER wmssource TYPE TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN roles TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN note VARCHAR(255)";
+        $sqls[] = "CREATE TABLE settings.workflow
+                    (
+                      id SERIAL NOT NULL,
+                      f_schema_name CHARACTER VARYING(255),
+                      f_table_name CHARACTER VARYING(255),
+                      gid INTEGER,
+                      status INTEGER,
+                      gc2_user CHARACTER VARYING(255),
+                      roles hstore,
+                      workflow hstore,
+                      version_gid INTEGER,
+                      operation CHARACTER VARYING(255),
+                      created TIMESTAMP WITH TIME ZONE DEFAULT ('now'::TEXT)::TIMESTAMP(0) WITH TIME ZONE
+                    )";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN elasticsearch TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN uuid UUID NOT NULL DEFAULT uuid_generate_v4()";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN tags JSON";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN meta JSON";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN wmsclientepsgs TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN featureid VARCHAR(255)";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ALTER meta TYPE JSONB";
+        $sqls[] = "CREATE INDEX geometry_columns_join_meta_idx ON settings.geometry_columns_join USING gin (meta)";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ALTER tags TYPE JSONB";
+        $sqls[] = "CREATE INDEX geometry_columns_join_tags_idx ON settings.geometry_columns_join USING gin (tags)";
+        $sqls[] = "CREATE TABLE settings.qgis_files
+                    (
+                      id VARCHAR(255) NOT NULL UNIQUE PRIMARY KEY,
+                      xml TEXT NOT NULL,
+                      db VARCHAR(255) NOT NULL,
+                      timestamp TIMESTAMP DEFAULT now() NOT NULL
+                    )";
+        $sqls[] = "CREATE TABLE settings.key_value
+                    (
+                      id    SERIAL       NOT NULL       CONSTRAINT key_value_id_pk       PRIMARY KEY,
+                      key   VARCHAR(256) NOT NULL,
+                      value JSONB        NOT NULL
+                    )";
+        $sqls[] = "CREATE UNIQUE INDEX key_value_key_uindex ON settings.key_value (key)";
+        $sqls[] = "UPDATE settings.geometry_columns_join SET wmssource = replace(wmssource, '127.0.0.1', 'gc2core')";
+        // $sqls[] = "UPDATE settings.geometry_columns_join SET wmssource = replace(wmssource, 'gc2core', '127.0.0.1')";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ALTER COLUMN authentication TYPE VARCHAR(255) USING authentication::VARCHAR(255)";
+        $sqls[] = "CREATE INDEX geometry_columns_join_authentication_idx ON settings.geometry_columns_join (authentication)";
+        $sqls[] = "CREATE INDEX geometry_columns_join_baselayer_idx ON settings.geometry_columns_join (baselayer)";
+        $sqls[] = "CREATE TABLE settings.prepared_statements
+                    (
+                      uuid      UUID                      NOT NULL  DEFAULT uuid_generate_v4()  PRIMARY KEY,
+                      name      CHARACTER VARYING(255)    NOT NULL,
+                      statement text                      NOT NULL,
+                      created   TIMESTAMP WITH TIME ZONE  NOT NULL  DEFAULT ('now'::TEXT)::TIMESTAMP(0) WITH TIME ZONE,
+                      CONSTRAINT name_unique UNIQUE (name)
+                    )";
+        $sqls[] = "ALTER TABLE settings.qgis_files ADD COLUMN old BOOLEAN DEFAULT FALSE";
+        $sqls[] = "CREATE TABLE settings.seed_jobs
+                    (
+                      uuid      UUID                      NOT NULL  DEFAULT uuid_generate_v4()  PRIMARY KEY,
+                      name      CHARACTER VARYING(255)    NOT NULL,
+                      pid       INTEGER                   NOT NULL,
+                      host      CHARACTER VARYING(255)    NOT NULL,
+                      created   TIMESTAMP WITH TIME ZONE  NOT NULL  DEFAULT ('now'::TEXT)::TIMESTAMP(0) WITH TIME ZONE
+                    )";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN legend_url VARCHAR(255)";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ALTER roles TYPE JSONB USING roles::jsonb";
+        $sqls[] = "CREATE TABLE settings.geofence
+                    (
+                    id                   serial UNIQUE NOT NULL,
+                    priority             integer NOT NULL default 1::int,
+                    username             varchar default '*'::character varying,
+                    service              varchar default '*'::character varying,
+                    request              varchar default '*'::character varying,
+                    layer                varchar default '*'::character varying,
+                    iprange              varchar default '*'::character varying,
+                    schema               varchar default '*'::character varying,
+                    access               varchar default 'deny'::character varying,
+                    filter         text,
+                    CHECK (service in ('*', 'sql', 'ows', 'wfst')),
+                    CHECK (request in ('*', 'select', 'insert', 'update', 'delete')),
+                    CHECK (access in ('*', 'allow', 'deny', 'limit'))
+                )";
+        $sqls[] = "ALTER TABLE settings.key_value ADD COLUMN created TIMESTAMP WITH TIME ZONE DEFAULT ('now'::TEXT)::TIMESTAMP(0) WITH TIME ZONE";
+        $sqls[] = "ALTER TABLE settings.key_value ADD COLUMN updated TIMESTAMP WITH TIME ZONE DEFAULT ('now'::TEXT)::TIMESTAMP(0) WITH TIME ZONE";
+        $sqls[] = "CREATE TABLE settings.symbols
+                    (
+                        id                   varchar not null PRIMARY KEY,
+                        rotation             float,
+                        scale                float,
+                        zoom                 int,
+                        svg                  text,
+                        browserid            varchar,
+                        userid               varchar,  
+                        anonymous            bool,
+                        file                 varchar,  
+                        tag                  varchar,
+                        the_geom             geometry(POINT, 4326)
+                    )";
+        $sqls[] = "ALTER TABLE settings.symbols ADD COLUMN timestamp TIMESTAMP WITH TIME ZONE DEFAULT ('now'::TEXT)::TIMESTAMP(0) WITH TIME ZONE";
+        $sqls[] = "ALTER TABLE settings.symbols ADD COLUMN properties jsonb";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN enableows BOOL DEFAULT TRUE NOT NULL";
+        $sqls[] = "create table settings.views
+                    (
+                        name                  varchar                                not null,
+                        schemaname            varchar                                not null,
+                        owner                 varchar                                not null,
+                        definition            text                                   not null,
+                        timestamp             timestamp with time zone default now() not null,
+                        ismat                 boolean                                not null,
+                        constraint views_pk
+                            primary key (name, schemaname)
+                    )";
+        $sqls[] = "create table settings.clients
+                    (
+                        id                    varchar                                not null,
+                        name                  varchar                                not null,
+                        homepage              varchar                                        ,
+                        description           text                                           ,
+                        redirect_uri          varchar                                not null,
+                        secret                varchar                                        ,
+                        constraint clients_pk
+                            primary key (id)
+                    )";
+        $sqls[] = "alter table settings.clients add \"public\" boolean default true not null";
+        $sqls[] = "alter table settings.clients add confirm boolean default false not null";
+        $sqls[] = "alter table settings.clients rename column twofactor to two_factor";
+        $sqls[] = "alter table settings.clients add two_factor boolean default false not null";
+        $sqls[] = "alter table settings.clients add allow_signup boolean default false not null";
+        $sqls[] = "alter table settings.clients add social_signup boolean default false not null";
+        $sqls[] = "alter table settings.clients add created timestamptz default now() not null";
+        $sqls[] = "alter table settings.clients alter redirect_uri DROP NOT NULL";
+        $sqls[] = "INSERT INTO settings.clients (id, name, description, redirect_uri) values ('gc2-cli', 'gc2-cli', 'Client for use in CLI','[\"http://127.0.0.1:5657/auth/callback\"]')";
+        $sqls[] = "create table settings.cost
+                    (
+                        id        serial,
+                        timestamp timestamp default now() not null,
+                        username  varchar(255)            not null,
+                        statement text                    not null,
+                        cost      float                   not null
+                    )";
+        $sqls[] = "alter table settings.prepared_statements add type_hints jsonb";
+        $sqls[] = "alter table settings.prepared_statements add type_formats jsonb";
+        $sqls[] = "alter table settings.prepared_statements add output_format varchar(255)";
+        $sqls[] = "alter table settings.prepared_statements add srs int4";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN class_cache jsonb";
+        $sqls[] = "alter table settings.geometry_columns_join alter class type jsonb using class::jsonb";
+        $sqls[] = "ALTER TABLE settings.prepared_statements ADD COLUMN username varchar(255)";
+        $sqls[] = "alter table settings.prepared_statements add output_schema jsonb";
+        $sqls[] = "alter table settings.prepared_statements add input_schema jsonb";
+        $sqls[] = "alter table settings.prepared_statements add request varchar check (request in ('*', 'select', 'insert', 'update', 'delete', 'merge'))";
+        $sqls[] = "create table settings.events
+                    (
+                        id        serial,
+                        timestamp timestamp default now() not null,
+                        schema varchar(255) not null,
+                        rel varchar(255) not null,
+                        op varchar(255) not null,
+                        batch  jsonb            not null
+                    )";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ALTER privileges TYPE JSONB USING privileges::jsonb";
+        $sqls[] = "ALTER TABLE settings.symbols ADD COLUMN deleted boolean default false not null";
+        $sqls[] = "CREATE TABLE settings.outbox (
+                        id BIGSERIAL PRIMARY KEY,
+                        op CHAR(1) NOT NULL CHECK (op IN ('I', 'U', 'D')),
+                        schema_name TEXT NOT NULL,
+                        table_name TEXT NOT NULL,
+                        pk_column TEXT NOT NULL,
+                        pk_value TEXT NOT NULL,
+                        payload JSONB,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                    )";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join ADD COLUMN qml TEXT";
+        $sqls[] = "ALTER TABLE settings.key_value ADD COLUMN owner VARCHAR(256)";
+        $sqls[] = "ALTER TABLE settings.key_value ADD COLUMN public BOOLEAN DEFAULT FALSE";
+        $sqls[] = "DROP VIEW non_postgis_matviews CASCADE";
+        $sqls[] = "CREATE VIEW non_postgis_matviews AS
+                    SELECT
+                      t.matviewname :: CHARACTER VARYING(256)     AS f_table_name,
+                      t.schemaname :: CHARACTER VARYING(256)      AS f_table_schema,
+                      'gc2_non_postgis' :: CHARACTER VARYING(256) AS f_geometry_column,
+                      NULL :: INTEGER                             AS coord_dimension,
+                      NULL :: INTEGER                             AS srid,
+                      NULL :: CHARACTER VARYING(30)               AS type
+                    FROM pg_matviews t
+                      LEFT JOIN geometry_columns
+                        ON t.matviewname = geometry_columns.f_table_name AND t.schemaname = geometry_columns.f_table_schema
+                      LEFT JOIN raster_columns
+                        ON t.matviewname = raster_columns.r_table_name AND t.schemaname = raster_columns.r_table_schema
+                    WHERE
+                      geometry_columns.f_geometry_column ISNULL AND
+                      raster_columns.r_raster_column ISNULL AND
+                      NOT t.schemaname :: TEXT = 'settings' :: TEXT AND
+                      NOT (t.schemaname :: TEXT = 'public' :: TEXT AND
+                           t.schemaname :: TEXT = 'spatial_ref_sys' :: TEXT) AND
+                      NOT (t.schemaname :: TEXT = 'public' :: TEXT AND t.matviewname :: TEXT = 'geometry_columns' :: TEXT) AND
+                      NOT (t.schemaname :: TEXT = 'public' :: TEXT AND t.matviewname :: TEXT = 'geography_columns' :: TEXT) AND
+                      NOT (t.schemaname :: TEXT = 'public' :: TEXT AND t.matviewname :: TEXT = 'raster_columns' :: TEXT) AND
+                      NOT (t.schemaname :: TEXT = 'public' :: TEXT AND t.matviewname :: TEXT = 'raster_overviews' :: TEXT) AND
+                      NOT (t.schemaname :: TEXT = 'public' :: TEXT AND t.matviewname :: TEXT = 'non_postgis_tables' :: TEXT) AND
+                      NOT t.schemaname :: TEXT = 'pg_catalog' :: TEXT AND NOT t.schemaname :: TEXT = 'information_schema' :: TEXT;
+                    ";
+
+        $sqls[] = "DROP VIEW non_postgis_tables CASCADE";
+        $sqls[] = "CREATE VIEW non_postgis_tables AS
+                     SELECT
+                      t.table_name :: CHARACTER VARYING(256)      AS f_table_name,
+                      t.table_schema :: CHARACTER VARYING(256)    AS f_table_schema,
+                      'gc2_non_postgis' :: CHARACTER VARYING(256) AS f_geometry_column,
+                      NULL :: INTEGER                             AS coord_dimension,
+                      NULL :: INTEGER                             AS srid,
+                      NULL :: CHARACTER VARYING(30)               AS type
+                    FROM information_schema.tables t
+                      LEFT JOIN geometry_columns
+                        ON t.table_name = geometry_columns.f_table_name AND t.table_schema = geometry_columns.f_table_schema
+                      LEFT JOIN raster_columns
+                        ON t.table_name = raster_columns.r_table_name AND t.table_schema = raster_columns.r_table_schema
+                    WHERE
+                      geometry_columns.f_geometry_column ISNULL AND
+                      raster_columns.r_raster_column ISNULL AND
+                      NOT t.table_schema :: TEXT = 'settings' :: TEXT AND
+                      NOT (t.table_schema :: TEXT = 'public' :: TEXT AND
+                           t.table_name :: TEXT = 'spatial_ref_sys' :: TEXT) AND
+                      NOT (t.table_schema :: TEXT = 'public' :: TEXT AND t.table_name :: TEXT = 'geometry_columns' :: TEXT) AND
+                      NOT (t.table_schema :: TEXT = 'public' :: TEXT AND t.table_name :: TEXT = 'geography_columns' :: TEXT) AND
+                      NOT (t.table_schema :: TEXT = 'public' :: TEXT AND t.table_name :: TEXT = 'raster_columns' :: TEXT) AND
+                      NOT (t.table_schema :: TEXT = 'public' :: TEXT AND t.table_name :: TEXT = 'raster_overviews' :: TEXT) AND
+                      NOT (t.table_schema :: TEXT = 'public' :: TEXT AND t.table_name :: TEXT = 'non_postgis_tables' :: TEXT) AND
+                      NOT (t.table_schema :: TEXT = 'public' :: TEXT AND t.table_name :: TEXT = 'non_postgis_matviews' :: TEXT) AND
+                      NOT t.table_schema :: TEXT = 'pg_catalog' :: TEXT AND NOT t.table_schema :: TEXT = 'information_schema' :: TEXT;
+                    ";
+
+        // --- History tracking: settings.key_value ---
+        $sqls[] = "CREATE TABLE IF NOT EXISTS settings.key_value_history (LIKE settings.key_value)";
+        $sqls[] = "ALTER TABLE settings.key_value_history ADD COLUMN IF NOT EXISTS history_id BIGSERIAL";
+        $sqls[] = "ALTER TABLE settings.key_value_history ADD COLUMN IF NOT EXISTS history_operation CHAR(1)";
+        $sqls[] = "ALTER TABLE settings.key_value_history ADD COLUMN IF NOT EXISTS history_db_user TEXT";
+        $sqls[] = "ALTER TABLE settings.key_value_history ADD COLUMN IF NOT EXISTS history_timestamp TIMESTAMPTZ DEFAULT now()";
+        $sqls[] = <<<'SQL'
+CREATE OR REPLACE FUNCTION settings.history_trigger() RETURNS trigger
+LANGUAGE plpgsql AS $FN$
+DECLARE
+    hist_table text := TG_TABLE_NAME || '_history';
+    rec        record;
+    seq        text;
+    payload    jsonb;
+BEGIN
+    rec := CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+    seq := pg_get_serial_sequence('settings.' || hist_table, 'history_id');
+    payload := to_jsonb(rec) || jsonb_build_object(
+        'history_id',        nextval(seq),
+        'history_operation', left(TG_OP, 1),
+        'history_db_user',   current_user,
+        'history_timestamp', now()
+    );
+    EXECUTE format(
+        'INSERT INTO settings.%I SELECT (jsonb_populate_record(NULL::settings.%I, $1)).*',
+        hist_table, hist_table
+    ) USING payload;
+    RETURN NULL;
+END;
+$FN$
+SQL;
+        $sqls[] = "DROP TRIGGER IF EXISTS key_value_history_tr ON settings.key_value";
+        $sqls[] = "CREATE TRIGGER key_value_history_tr AFTER INSERT OR UPDATE OR DELETE ON settings.key_value FOR EACH ROW EXECUTE FUNCTION settings.history_trigger()";
+
+        // --- History tracking: settings.geometry_columns_join ---
+        $sqls[] = "CREATE TABLE IF NOT EXISTS settings.geometry_columns_join_history (LIKE settings.geometry_columns_join)";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join_history ADD COLUMN IF NOT EXISTS history_id BIGSERIAL";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join_history ADD COLUMN IF NOT EXISTS history_operation CHAR(1)";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join_history ADD COLUMN IF NOT EXISTS history_db_user TEXT";
+        $sqls[] = "ALTER TABLE settings.geometry_columns_join_history ADD COLUMN IF NOT EXISTS history_timestamp TIMESTAMPTZ DEFAULT now()";
+        $sqls[] = "DROP TRIGGER IF EXISTS geometry_columns_join_history_tr ON settings.geometry_columns_join";
+        $sqls[] = "CREATE TRIGGER geometry_columns_join_history_tr AFTER INSERT OR UPDATE OR DELETE ON settings.geometry_columns_join FOR EACH ROW EXECUTE FUNCTION settings.history_trigger()";
+
+        // --- Lambda-like functions (gVisor runtime) ---
+        $sqls[] = "CREATE TABLE settings.functions
+                    (
+                      uuid          UUID                      NOT NULL  DEFAULT uuid_generate_v4()  PRIMARY KEY,
+                      name          CHARACTER VARYING(255)    NOT NULL,
+                      runtime       CHARACTER VARYING(64)     NOT NULL,
+                      handler       CHARACTER VARYING(255)    NOT NULL,
+                      code          TEXT                      NOT NULL,
+                      code_sha      CHARACTER VARYING(64)     NOT NULL,
+                      env           JSONB,
+                      memory_mb     INTEGER                   NOT NULL  DEFAULT 128,
+                      timeout_s     INTEGER                   NOT NULL  DEFAULT 30,
+                      triggers      JSONB,
+                      input_schema  JSONB,
+                      output_schema JSONB,
+                      version       INTEGER                   NOT NULL  DEFAULT 1,
+                      username      CHARACTER VARYING(255),
+                      created       TIMESTAMP WITH TIME ZONE  NOT NULL  DEFAULT now(),
+                      updated       TIMESTAMP WITH TIME ZONE  NOT NULL  DEFAULT now(),
+                      CONSTRAINT functions_name_unique UNIQUE (name)
+                    )";
+        $sqls[] = "CREATE TABLE settings.function_invocations
+                    (
+                      uuid          UUID                      NOT NULL  DEFAULT uuid_generate_v4()  PRIMARY KEY,
+                      function_name CHARACTER VARYING(255)    NOT NULL,
+                      status        CHARACTER VARYING(32)     NOT NULL  DEFAULT 'pending',
+                      request       JSONB,
+                      response      JSONB,
+                      logs          TEXT,
+                      error         TEXT,
+                      duration_ms   INTEGER,
+                      username      CHARACTER VARYING(255),
+                      created       TIMESTAMP WITH TIME ZONE  NOT NULL  DEFAULT now(),
+                      finished      TIMESTAMP WITH TIME ZONE,
+                      CHECK (status IN ('pending', 'running', 'succeeded', 'failed'))
+                    )";
+        $sqls[] = "CREATE INDEX function_invocations_function_name_idx ON settings.function_invocations (function_name)";
+        // Async invocations (Phase 2): queue via the table itself.
+        $sqls[] = "ALTER TABLE settings.function_invocations ADD COLUMN invocation_type VARCHAR(16) NOT NULL DEFAULT 'sync'";
+        $sqls[] = "ALTER TABLE settings.function_invocations ADD COLUMN context JSONB";
+        $sqls[] = "CREATE INDEX function_invocations_pending_idx ON settings.function_invocations (created) WHERE status = 'pending' AND invocation_type = 'async'";
+        // Triggers (Phase 3): owner identity for system-triggered runs + schedule bookkeeping.
+        $sqls[] = "ALTER TABLE settings.functions ADD COLUMN owner_context JSONB";
+        $sqls[] = "ALTER TABLE settings.functions ADD COLUMN last_scheduled_at TIMESTAMP WITH TIME ZONE";
+
+        // Multi-file bundles: 'inline' (code column is source) or 'zip' (code is a base64 zip).
+        $sqls[] = "ALTER TABLE settings.functions ADD COLUMN package VARCHAR(16) NOT NULL DEFAULT 'inline'";
+
+        // DB-event triggers: a durable queue (owned by function_event_dispatcher,
+        // separate from settings.outbox which the realtime listener drains) plus a
+        // trigger function that writes row changes to it.
+        $sqls[] = "CREATE TABLE settings.function_event_queue
+                    (
+                      id          BIGSERIAL PRIMARY KEY,
+                      op          CHAR(1)   NOT NULL CHECK (op IN ('I', 'U', 'D')),
+                      schema_name TEXT      NOT NULL,
+                      table_name  TEXT      NOT NULL,
+                      pk_column   TEXT      NOT NULL,
+                      pk_value    TEXT      NOT NULL,
+                      payload     JSONB,
+                      created_at  TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+                    )";
+        $sqls[] = <<<'SQL'
+CREATE OR REPLACE FUNCTION _gc2_function_event() RETURNS TRIGGER AS $$
+DECLARE
+  t text;
+  snap jsonb;
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    EXECUTE 'SELECT $1.' || TG_ARGV[0] USING OLD INTO t;
+    snap := row_to_json(OLD)::jsonb;
+  ELSE
+    EXECUTE 'SELECT $1.' || TG_ARGV[0] USING NEW INTO t;
+    snap := row_to_json(NEW)::jsonb;
+  END IF;
+  INSERT INTO settings.function_event_queue (op, schema_name, table_name, pk_column, pk_value, payload)
+  VALUES (left(TG_OP, 1), TG_ARGV[1], TG_ARGV[2], TG_ARGV[0], t, snap);
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+SQL;
+
+        // Snapshots: async export of a relation to Parquet on S3 (see
+        // app/inc/SnapshotWorker.php). The table is the queue.
+        $sqls[] = "CREATE TABLE settings.snapshots
+                    (
+                      uuid          UUID                      NOT NULL  DEFAULT uuid_generate_v4()  PRIMARY KEY,
+                      schema_name   TEXT                      NOT NULL,
+                      relation_name TEXT                      NOT NULL,
+                      srs           INTEGER,
+                      status        CHARACTER VARYING(32)     NOT NULL  DEFAULT 'pending',
+                      s3_path       TEXT,
+                      row_count     BIGINT,
+                      error         TEXT,
+                      username      CHARACTER VARYING(255),
+                      created       TIMESTAMP WITH TIME ZONE  NOT NULL  DEFAULT now(),
+                      started       TIMESTAMP WITH TIME ZONE,
+                      finished      TIMESTAMP WITH TIME ZONE,
+                      CHECK (status IN ('pending', 'running', 'succeeded', 'failed'))
+                    )";
+        $sqls[] = "CREATE INDEX snapshots_pending_idx ON settings.snapshots (created) WHERE status = 'pending'";
+        $sqls[] = "CREATE INDEX snapshots_relation_idx ON settings.snapshots (schema_name, relation_name)";
+        // Column shape of the relation at snapshot time: a fingerprint and the
+        // column list itself (name + type), mirrored in metadata.json on S3.
+        $sqls[] = "ALTER TABLE settings.snapshots ADD COLUMN schema_version TEXT";
+        $sqls[] = "ALTER TABLE settings.snapshots ADD COLUMN relation_schema JSONB";
+        // Read side of snapshots: the catalog identifies a snapshot by relation +
+        // date, remembers its files, and only shows published rows.
+        $sqls[] = "ALTER TABLE settings.snapshots ADD COLUMN snapshot_date DATE";
+        $sqls[] = "ALTER TABLE settings.snapshots ADD COLUMN files JSONB";
+        $sqls[] = "ALTER TABLE settings.snapshots ADD COLUMN size_bytes BIGINT";
+        $sqls[] = "ALTER TABLE settings.snapshots ADD COLUMN published TIMESTAMP WITH TIME ZONE";
+        // WGS84 footprint of the relation at snapshot time ([minx,miny,maxx,maxy]
+        // or null), the geometry of the snapshot's STAC Item.
+        $sqls[] = "ALTER TABLE settings.snapshots ADD COLUMN IF NOT EXISTS bbox JSONB";
+        // Output formats of the snapshot: the requested format ids while the row
+        // waits, the per-format result (produced with file/size/media type, or
+        // skipped with a reason) once it is published. A row from before this
+        // column is described by its files instead.
+        $sqls[] = "ALTER TABLE settings.snapshots ADD COLUMN IF NOT EXISTS formats JSONB";
+        $sqls[] = "ALTER TABLE settings.snapshots DROP CONSTRAINT snapshots_status_check";
+        $sqls[] = "ALTER TABLE settings.snapshots ADD CONSTRAINT snapshots_status_check CHECK (status IN ('pending', 'running', 'succeeded', 'failed', 'superseded'))";
+        $sqls[] = "CREATE UNIQUE INDEX snapshots_published_unique_idx ON settings.snapshots (schema_name, relation_name, snapshot_date) WHERE status = 'succeeded'";
+
+        // A relation abstract holds a real description — the Danish grunddata in
+        // the "dk" database run to ~800 characters — which the original
+        // varchar(256) truncates with SQLSTATE 22001. The history table above is
+        // created with LIKE, so it carries the same narrow type and its audit
+        // trigger fails the write from behind; both have to be retyped. Guarded,
+        // so it happens once: Postgres refuses to alter a column a view selects,
+        // so the dependent view goes first and the Views1.php include below
+        // recreates it in the same run.
+        $sqls[] = "DO $$
+            BEGIN
+                IF EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = 'settings'
+                             AND table_name = 'geometry_columns_join'
+                             AND column_name = 'f_table_abstract'
+                             AND data_type <> 'text') THEN
+                    DROP VIEW IF EXISTS settings.geometry_columns_view;
+                    ALTER TABLE settings.geometry_columns_join ALTER COLUMN f_table_abstract TYPE text;
+                END IF;
+                IF EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = 'settings'
+                             AND table_name = 'geometry_columns_join_history'
+                             AND column_name = 'f_table_abstract'
+                             AND data_type <> 'text') THEN
+                    ALTER TABLE settings.geometry_columns_join_history ALTER COLUMN f_table_abstract TYPE text;
+                END IF;
+            END $$;";
+
+        // The tile seeder queue (docs/superpowers/specs/2026-09-30-tileseeder-v4-design.md):
+        // a seed is a row a worker claims, so status, log and cancel work from any node.
+        // pid and host are only known once a worker has claimed the row.
+        $sqls[] = "ALTER TABLE settings.seed_jobs ALTER COLUMN pid DROP NOT NULL";
+        $sqls[] = "ALTER TABLE settings.seed_jobs ALTER COLUMN host DROP NOT NULL";
+        foreach ([
+            'status' => 'VARCHAR(16)', 'username' => 'VARCHAR(255)', 'tileset' => 'VARCHAR(255)',
+            'grid' => 'VARCHAR(255)', 'zoom_start' => 'SMALLINT', 'zoom_end' => 'SMALLINT',
+            'extent_layer' => 'VARCHAR(255)', 'threads' => 'SMALLINT',
+            'started' => 'TIMESTAMPTZ', 'finished' => 'TIMESTAMPTZ', 'heartbeat' => 'TIMESTAMPTZ',
+            'cancel_requested' => 'TIMESTAMPTZ', 'error' => 'TEXT', 'log' => 'TEXT', 'log_path' => 'TEXT',
+        ] as $col => $type) {
+            $sqls[] = "ALTER TABLE settings.seed_jobs ADD COLUMN IF NOT EXISTS $col $type";
+        }
+        $sqls[] = "CREATE INDEX IF NOT EXISTS seed_jobs_status_created_idx ON settings.seed_jobs (status, created)";
+
+        // Per-schema tile settings for the merged <schema> tileset
+        // (docs/superpowers/specs/2026-10-01-schema-tile-settings-design.md).
+        // The row deliberately outlives its schema: dropping and recreating a
+        // schema is normal here, and the settings should survive it. A row for a
+        // schema that does not exist is never read, because Mapcachefile's
+        // per-schema loop iterates the schemas that actually have layers.
+        $sqls[] = "CREATE TABLE IF NOT EXISTS settings.schema_settings
+                    (
+                      schema  CHARACTER VARYING(255)    NOT NULL  PRIMARY KEY,
+                      def     JSONB,
+                      created TIMESTAMP WITH TIME ZONE  NOT NULL  DEFAULT now()
+                    )";
+        include 'Views1.php';
+        return $sqls;
+    }
+
+    /**
+     * @return array<string>
+     */
+    public static function mapcentia(): array
+    {
+        $sqls[] = "ALTER TABLE users ADD COLUMN parentdb VARCHAR(255)";
+        $sqls[] = "ALTER TABLE users ADD COLUMN usergroup VARCHAR(255)";
+        $sqls[] = "ALTER TABLE users ALTER COLUMN screenname SET NOT NULL";
+        $sqls[] = "ALTER TABLE users ALTER COLUMN pw SET NOT NULL";
+        $sqls[] = "ALTER TABLE users DROP CONSTRAINT user_unique";
+        $sqls[] = "ALTER TABLE users ADD CONSTRAINT user_unique UNIQUE (screenname, parentdb)";
+        $sqls[] = "ALTER TABLE users ADD COLUMN properties JSONB";
+        $sqls[] = "CREATE TABLE logins
+                    (
+                      id SERIAL NOT NULL,
+                      db VARCHAR(255) NOT NULL,
+                      \"user\" VARCHAR(255) NOT NULL,
+                      timestamp TIMESTAMP DEFAULT now() NOT NULL
+                    )";
+        $sqls[] = "ALTER TABLE users ADD COLUMN default_user boolean default false not null";
+        $sqls[] = "CREATE UNIQUE INDEX only_one_true_default_useridx
+                        ON users (default_user, parentdb)
+                        WHERE default_user IS TRUE";
+        $sqls[] = "ALTER TABLE users ADD CONSTRAINT email_unique_for_parent UNIQUE  (parentdb, email)";
+        $sqls[] = "ALTER TABLE public.users ALTER COLUMN email SET NOT NULL";
+        $sqls[] = "ALTER TABLE users ADD COLUMN private_properties JSONB";
+        $sqls[] = "ALTER TABLE users ALTER COLUMN usergroup TYPE jsonb
+                        USING CASE
+                            WHEN usergroup IS NULL THEN NULL
+                            WHEN usergroup ~ '^\s*\[.*\]\s*$' THEN usergroup::jsonb
+                            ELSE jsonb_build_array(usergroup)
+                        END";
+//        $sqls[] = "ALTER TABLE users ALTER COLUMN usergroup TYPE varchar USING usergroup->>0";
+
+        return $sqls;
+    }
+
+    /**
+     * @return array<string>
+     */
+    public static function gc2scheduler(): array
+    {
+        $sqls[] = "ALTER TABLE jobs ALTER url TYPE TEXT";
+        // Opt out of the automatic WFS 2.0.0 sortBy (WfsPaging, get.php
+        // getCmdWfsPaging) for a server that rejects the parameter. Defaults to
+        // true, so existing jobs keep paging in a stable order.
+        $sqls[] = "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS use_sortby BOOLEAN DEFAULT true";
+        $sqls[] = "ALTER TABLE jobs ADD COLUMN delete_append BOOL DEFAULT FALSE";
+        $sqls[] = "ALTER TABLE jobs ADD COLUMN lastrun timestamp with time zone";
+        $sqls[] = "ALTER TABLE jobs ADD COLUMN presql text";
+        $sqls[] = "ALTER TABLE jobs ADD COLUMN postsql text";
+        $sqls[] = "ALTER TABLE jobs ADD COLUMN download_schema BOOL DEFAULT TRUE";
+        $sqls[] = "ALTER TABLE jobs ADD COLUMN report jsonb";
+        $sqls[] = "ALTER TABLE jobs ADD COLUMN active BOOL DEFAULT TRUE";
+        $sqls[] = "ALTER TABLE jobs ADD COLUMN snapshot BOOL DEFAULT FALSE";
+        // Per-job snapshot formats; NULL means the server default (snapshot.formats in App.php).
+        $sqls[] = "ALTER TABLE jobs ADD COLUMN snapshot_formats JSONB";
+        $sqls[] = "CREATE EXTENSION \"uuid-ossp\"";
+        $sqls[] = "create table public.started_jobs
+                    (
+                        uuid    uuid                     default uuid_generate_v4() not null primary key,
+                        pid     integer                                             not null,
+                        created timestamp with time zone default ('now'::text)::timestamp(0) with time zone,
+                        id      integer                                             not null,
+                        db      varchar(255)                                        not null,
+                        name    varchar(255)
+                    );
+                  ";
+        // Scheduler run registry: started_jobs gains lifecycle columns; locks
+        // themselves are Postgres advisory locks (see app/inc/SchedulerLock.php).
+        $sqls[] = "ALTER TABLE started_jobs ADD COLUMN started_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()";
+        $sqls[] = "ALTER TABLE started_jobs ADD COLUMN heartbeat TIMESTAMP WITH TIME ZONE";
+        $sqls[] = "ALTER TABLE started_jobs ADD COLUMN finished_at TIMESTAMP WITH TIME ZONE";
+        $sqls[] = "ALTER TABLE started_jobs ADD COLUMN status VARCHAR(16) NOT NULL DEFAULT 'running'";
+        $sqls[] = "ALTER TABLE started_jobs ADD COLUMN host VARCHAR(255)";
+        $sqls[] = "ALTER TABLE started_jobs ADD COLUMN slot INTEGER";
+        $sqls[] = "ALTER TABLE started_jobs ADD COLUMN exit_reason TEXT";
+        $sqls[] = "ALTER TABLE started_jobs ADD COLUMN log TEXT";
+        // The ADD COLUMN above defaults every pre-existing row's started_at to
+        // the moment the migration ran; `created` holds the real value.
+        // Idempotent: on a second run no row matches.
+        $sqls[] = "UPDATE started_jobs SET started_at = created WHERE created IS NOT NULL AND created < started_at - interval '1 minute'";
+        // Rows that predate the registry can never be reaped honestly (no
+        // heartbeat, no lock); retire them instead of leaving them 'running'.
+        $sqls[] = "UPDATE started_jobs SET status = 'lost', finished_at = created, exit_reason = 'row predates the run registry' WHERE status = 'running' AND heartbeat IS NULL AND created IS NOT NULL AND created < now() - interval '1 day'";
+        $sqls[] = "ALTER TABLE started_jobs ADD CONSTRAINT started_jobs_status_check CHECK (status IN ('running', 'succeeded', 'failed', 'skipped', 'lost'))";
+        $sqls[] = "CREATE INDEX started_jobs_running_idx ON started_jobs (id) WHERE status = 'running'";
+        // The listing branch of runsFor() and the retention delete both order
+        // by started_at within one database.
+        $sqls[] = "CREATE INDEX IF NOT EXISTS started_jobs_db_started_idx ON started_jobs (db, started_at DESC)";
+        return $sqls;
+    }
+}

@@ -71,7 +71,8 @@ addScratch.init = function () {
                         {
                             name: 'POLYGON',
                             value: 'POLYGON'
-                        },{
+                        },
+                        {
                             name: 'MULTIPOINT',
                             value: 'MULTIPOINT'
                         },

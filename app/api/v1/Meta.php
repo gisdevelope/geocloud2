@@ -1,31 +1,31 @@
 <?php
 /**
- * Long description for file
- *
- * Long description for file (if any)...
- *  
- * @category   API
- * @package    app\api\v1
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2022 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
- * @since      File available since Release 2013.1
- *  
+ *
  */
 
 namespace app\api\v1;
 
-use \app\inc\Input;
-use \app\inc\Session;
+use app\exceptions\GC2Exception;
+use app\inc\Controller;
+use app\inc\Input;
+use app\inc\Route;
+use app\inc\Session;
+use app\inc\Util;
+use app\models\Layer;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
+use Phpfastcache\Exceptions\PhpfastcacheLogicException;
 
 /**
  * Class Meta
  * @package app\api\v1
  */
-class Meta extends \app\inc\Controller
+class Meta extends Controller
 {
     /**
-     * @var \app\models\Layer
+     * @var Layer
      */
     private $layers;
 
@@ -36,17 +36,20 @@ class Meta extends \app\inc\Controller
     {
         parent::__construct();
 
-        $this->layers = new \app\models\Layer();
+        $this->layers = new Layer();
     }
 
     /**
      * @return array
+     * @throws PhpfastcacheInvalidArgumentException
+     * @throws PhpfastcacheLogicException
+     * @throws GC2Exception
      */
     public function get_index()
     {
         // Get the URI params from request
         // /meta/{user}/[query]
-        $r = func_get_arg(0);
-        return $this->layers->getAll($r["query"], Session::isAuth(), Input::get("iex"), Input::get("parse"), Input::get("es"));
+        $db = Util::extractUserFromSubUserString(Route::getParam("user"))[1];
+        return $this->layers->getAll($db, Session::isAuth(), Route::getParam("query"), Input::get("iex"), Input::get("parse"), Input::get("es"), false);
     }
 }

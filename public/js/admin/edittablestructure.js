@@ -35,9 +35,9 @@ Ext.ux.grid.CheckColumn = Ext.extend(
 /**
  *
  * @param record
- * @param screenName
+ * @param db
  */
-tableStructure.init = function (record, screenName) {
+tableStructure.init = function (record, db) {
     tableStructure.reader = new Ext.data.JsonReader({
         totalProperty: 'total',
         successProperty: 'success',
@@ -78,6 +78,14 @@ tableStructure.init = function (record, screenName) {
             allowBlank: true
         },
         {
+            name: 'not_exportable',
+            allowBlank: true
+        },
+        {
+            name: 'autocomplete',
+            allowBlank: true
+        },
+        {
             name: 'conflict',
             allowBlank: true
         },
@@ -90,7 +98,15 @@ tableStructure.init = function (record, screenName) {
             allowBlank: true
         },
         {
+            name: 'ignore',
+            allowBlank: true
+        },
+        {
             name: 'image',
+            allowBlank: true
+        },
+        {
+            name: 'content',
             allowBlank: true
         },
         {
@@ -98,7 +114,19 @@ tableStructure.init = function (record, screenName) {
             allowBlank: true
         },
         {
+            name: 'linksuffix',
+            allowBlank: true
+        },
+        {
+            name: 'template',
+            allowBlank: true
+        },
+        {
             name: 'properties',
+            allowBlank: true
+        },
+        {
+            name: 'desc',
             allowBlank: true
         }
     ]);
@@ -179,9 +207,28 @@ tableStructure.init = function (record, screenName) {
     tableStructure.store.setDefaultSort('sort_id', 'asc');
     tableStructure.store.load();
 
+
     /**
      *
      */
+    var contentCombo = new Ext.form.ComboBox({
+        store: new Ext.data.ArrayStore({
+            fields: ['key', 'text'],
+            data: [
+                ['plain', 'Plain'],
+                ['image', 'Image'],
+                ['video', 'Video']
+            ]
+        }),
+        displayField: 'text',
+        valueField: 'key',
+        mode: 'local',
+        typeAhead: false,
+        editable: false,
+        triggerAction: 'all',
+        lazyRender: true
+    });
+
     tableStructure.grid = new Ext.grid.EditorGridPanel({
         iconCls: 'silk-grid',
         store: tableStructure.store,
@@ -258,6 +305,15 @@ tableStructure.init = function (record, screenName) {
                     })
                 },
                 {
+                    id: "desc",
+                    header: __("Description"),
+                    dataIndex: "desc",
+                    sortable: true,
+                    editor: new Ext.form.TextField({
+                        allowBlank: true
+                    })
+                },
+                {
                     id: "querable",
                     xtype: 'checkcolumn',
                     header: __("Show in click info"),
@@ -269,7 +325,7 @@ tableStructure.init = function (record, screenName) {
                     xtype: 'checkcolumn',
                     header: __("Show in mouse-over"),
                     dataIndex: 'mouseover',
-                    //width: 40
+                    hidden: false
                 },
                 {
                     id: "searchable",
@@ -281,16 +337,24 @@ tableStructure.init = function (record, screenName) {
                 {
                     id: "filter",
                     xtype: 'checkcolumn',
-                    header: __("Enable filtering"),
+                    header: __("Disable filtering"),
                     dataIndex: 'filter',
                     //width: 40
-                }, {
+                },
+                {
+                    id: "autocomplete",
+                    xtype: 'checkcolumn',
+                    header: __("Autocomplete"),
+                    dataIndex: 'autocomplete',
+                    //width: 40
+                },
+                {
                     id: "conflict",
                     xtype: 'checkcolumn',
                     header: __("Show in conflict"),
                     dataIndex: 'conflict',
                     //width: 40,
-                    hidden: (window.gc2Options.showConflictOptions !== null && window.gc2Options.showConflictOptions[screenName] === true) ? false : true
+                    hidden: (window.gc2Options.showConflictOptions !== null && window.gc2Options.showConflictOptions[db] === true) ? false : true
                 },
                 {
                     id: "link",
@@ -300,10 +364,25 @@ tableStructure.init = function (record, screenName) {
                     //width: 35
                 },
                 {
-                    id: "image",
+                    id: "not_exportable",
                     xtype: 'checkcolumn',
-                    header: __("Image"),
-                    dataIndex: 'image',
+                    header: __("Disable export"),
+                    dataIndex: 'not_exportable',
+                    //width: 40
+                },
+                {
+                    id: "ignore",
+                    xtype: 'checkcolumn',
+                    header: __("Ignore"),
+                    dataIndex: 'ignore',
+                    //width: 35
+                },
+                {
+                    id: "content",
+                    header: __("Content"),
+                    dataIndex: 'content',
+                    renderer: Ext.util.Format.comboRenderer(contentCombo),
+                    editor: contentCombo
                     //width: 35
                 },
                 {
@@ -317,6 +396,34 @@ tableStructure.init = function (record, screenName) {
                     })
                 },
                 {
+                    id: "linksuffix",
+                    header: __("Link suffix"),
+                    dataIndex: "linksuffix",
+                    sortable: true,
+                    //width: 60,
+                    editor: new Ext.form.TextField({
+                        allowBlank: true
+                    })
+                },
+                {
+                    id: "template",
+                    header: __("Template"),
+                    dataIndex: "template",
+                    sortable: true,
+                    //width: 80,
+                    editor: new Ext.form.TextArea({
+                        allowBlank: true
+                    }),
+                    renderer: function (val) {
+                        // Encode htmlentities
+                        if (val) {
+                            return val.replace(/[\u00A0-\u9999<>\&]/gim, function (i) {
+                                return '&#' + i.charCodeAt(0) + ';';
+                            });
+                        }
+                    }
+                },
+                {
                     id: "properties",
                     header: __("Properties"),
                     dataIndex: "properties",
@@ -328,55 +435,6 @@ tableStructure.init = function (record, screenName) {
                 }
             ]
         }),
-        listeners: {
-            "render": {
-                scope: this,
-                fn: function (grid) {
-
-                    // Enable sorting Rows via Drag & Drop
-                    // this drop target listens for a row drop
-                    // and handles rearranging the rows
-
-                    var ddrow = new Ext.dd.DropTarget(grid.container, {
-                        ddGroup: 'mygridDD',
-                        copy: false,
-                        notifyDrop: function (dd, e, data) {
-
-                            var ds = grid.store;
-
-                            // NOTE:
-                            // you may need to make an ajax call here
-                            // to send the new order
-                            // and then reload the store
-
-                            // alternatively, you can handle the changes
-                            // in the order of the row as demonstrated below
-
-                            // ***************************************
-
-                            var sm = grid.getSelectionModel();
-                            var rows = sm.getSelections();
-                            if (dd.getDragData(e)) {
-                                var cindex = dd.getDragData(e).rowIndex;
-                                if (typeof (cindex) != "undefined") {
-                                    for (i = 0; i < rows.length; i++) {
-                                        ds.remove(ds.getById(rows[i].id));
-                                    }
-                                    ds.insert(cindex, data.selections);
-                                    sm.clearSelections();
-                                }
-                            }
-
-                            // ************************************
-                        }
-                    });
-
-                    // load the grid store
-                    // after the grid has been rendered
-                    // store.load();
-                }
-            }
-        },
         tbar: [
             {
                 xtype: 'form',
@@ -419,7 +477,11 @@ tableStructure.init = function (record, screenName) {
                                 },
                                 {
                                     name: 'Decimal',
-                                    value: 'float'
+                                    value: 'decimal'
+                                },
+                                {
+                                    name: 'Double',
+                                    value: 'double'
                                 },
                                 {
                                     name: 'Text',
@@ -428,6 +490,22 @@ tableStructure.init = function (record, screenName) {
                                 {
                                     name: 'Date',
                                     value: 'date'
+                                },
+                                {
+                                    name: 'Timestamp',
+                                    value: 'timestamp'
+                                },
+                                {
+                                    name: 'Time',
+                                    value: 'time'
+                                },
+                                {
+                                    name: 'Timestamptz',
+                                    value: 'timestamptz'
+                                },
+                                {
+                                    name: 'Timetz',
+                                    value: 'timetz'
                                 },
                                 {
                                     name: 'Boolean',
@@ -440,6 +518,10 @@ tableStructure.init = function (record, screenName) {
                                 {
                                     name: 'Hstore',
                                     value: 'Hstore'
+                                },
+                                {
+                                    name: 'Json',
+                                    value: 'json'
                                 },
                                 {
                                     name: 'Geometry',
@@ -637,7 +719,7 @@ tableStructure.onIndexInElasticsearch = function (record) {
                 var param = "&key=" + settings.api_key + (record.data.triggertable ? "&ts=" + record.data.triggertable.split(".")[0] + "&tt=" + record.data.triggertable.split(".")[1] + "&tp=" + record.data.triggertable.split(".")[2] : "");
                 Ext.Ajax.request(
                     {
-                        url: '/api/v1/elasticsearch/river/' + screenName + '/' + record.data.f_table_schema + '/' + record.data.f_table_name,
+                        url: '/api/v2/elasticsearch/river/' + (subUser ? screenName + "@" + parentdb : screenName) + '/' + record.data.f_table_schema + '/' + record.data.f_table_name,
                         method: 'post',
                         params: param,
                         headers: {
@@ -686,7 +768,7 @@ tableStructure.onDeleteFromElasticsearch = function (record) {
                 var param = "&key=" + settings.api_key;
                 Ext.Ajax.request(
                     {
-                        url: '/api/v1/elasticsearch/delete/' + screenName + '/' + record.data.f_table_schema + '/' + record.data.f_table_name,
+                        url: '/api/v2/elasticsearch/delete/' + (subUser ? screenName + "@" + parentdb : screenName) + '/' + record.data.f_table_schema + '/' + record.data.f_table_name,
                         method: 'delete',
                         params: param,
                         headers: {
@@ -735,5 +817,6 @@ tableStructure.onWrite = function (store, action, result, transaction, rs) {
     if (transaction.message === "Renamed") {
         tableStructure.store.load();
     }
+    writeFiles();
 };
 

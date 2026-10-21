@@ -15,20 +15,28 @@
 
 namespace app\api\v1;
 
-use \app\inc\Input;
-use \app\inc\Util;
-use \app\conf\App;
+use app\inc\Controller;
+use app\inc\Input;
+use app\inc\Model;
+use app\inc\Util;
+use app\conf\App;
+use app\models\Sql_to_es;
 
 /**
  * Class Elasticsearch
  * @package app\api\v1
  */
-class Elasticsearch extends \app\inc\Controller
+class Elasticsearch extends Controller
 {
     /**
      * @var string
      */
     protected $host;
+
+    /**
+     * @var null
+     */
+    protected $port;
 
     /**
      * @var string
@@ -49,6 +57,12 @@ class Elasticsearch extends \app\inc\Controller
 
         $this->clientIp = Util::clientIp();
         $this->host = App::$param['esHost'] ?: "http://127.0.0.1";
+        $split = explode(":", $this->host);
+        if (!empty($split[2])) {
+            $this->port = $split[2];
+        } else {
+            $this->port = "9200";
+        }
         $defaultSettings = array(
             "settings" => array(
                 "number_of_shards" => 5,
@@ -96,7 +110,7 @@ class Elasticsearch extends \app\inc\Controller
             )
         );
         // Check if there are custom settings
-        if (!$this->settings = @file_get_contents(\app\conf\App::$param["path"] . "/app/conf/elasticsearch_settings.json")) {
+        if (!$this->settings = @file_get_contents(App::$param["path"] . "/app/conf/elasticsearch_settings.json")) {
             $this->settings = json_encode($defaultSettings);
         }
     }
@@ -139,7 +153,7 @@ class Elasticsearch extends \app\inc\Controller
             $response['message'] = "The URI must be in this form: /api/v1/elasticsearch/bulk/[user]/[index]/[type]/[id]?q=[SELECT query]";
             return $response;
         }
-        $api = new \app\models\Sql_to_es("4326");
+        $api = new Sql_to_es("4326");
         $api->execQuery("set client_encoding='UTF8'", "PDO");
         return $api->runSql(rawurldecode(Input::get('q')), Input::getPath()->part(6), Input::getPath()->part(7), Input::getPath()->part(8), Input::getPath()->part(5));
     }
@@ -151,7 +165,7 @@ class Elasticsearch extends \app\inc\Controller
     {
         $response = [];
         $get = Input::get();
-        if (\app\conf\App::$param["useKeyForSearch"] == true) {
+        if (App::$param["useKeyForSearch"] == true) {
             if ($response = ($this->checkAuth(Input::getPath()->part(5), $get['key']))) {
                 return $response;
             }
@@ -172,7 +186,7 @@ class Elasticsearch extends \app\inc\Controller
             $arr[] = $db . ($v ? "_" . $v : "") . ($type ? "_" . $type : "_*");
         }
         $index = implode(",", $arr);
-        $searchUrl = $this->host . ":9200/{$index}/{$type}/_search?pretty={$pretty}{$size}{$from}";
+        $searchUrl = $this->host . "/{$index}/_search?pretty={$pretty}{$size}{$from}";
         $ch = curl_init($searchUrl);
         curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "GET");
         curl_setopt($ch, CURLOPT_POSTFIELDS, $q);
@@ -265,7 +279,7 @@ class Elasticsearch extends \app\inc\Controller
 
         // Check if Es is online
         // =====================
-        $url = $this->host . ":9200";
+        $url = $this->host . ":{$this->port}";
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_HEADER, true);    // we want headers
         curl_setopt($ch, CURLOPT_NOBODY, true);    // we don't need body
@@ -312,7 +326,7 @@ class Elasticsearch extends \app\inc\Controller
         }
 
         $es = new \app\models\Elasticsearch();
-        $model = new \app\inc\Model();
+        $model = new Model();
 
         // Check which relation type we are dealing with
         // =============================================
@@ -339,7 +353,7 @@ class Elasticsearch extends \app\inc\Controller
         // Create or replace notify function in PG
         // =======================================
 
-        $pl = file_get_contents(\app\conf\App::$param["path"] . "/app/scripts/sql/notify_transaction.sql");
+        $pl = file_get_contents(App::$param["path"] . "/app/scripts/sql/notify_transaction.sql");
         // TODO check if sprintf is needed
         $pl = sprintf($pl, $priKey, $priKey, $priKey);
         $result = $model->execQuery($pl, "PG");
@@ -363,7 +377,7 @@ class Elasticsearch extends \app\inc\Controller
         // Delete the index if exist
         // =========================
 
-        $url = $this->host . ":9200/{$fullIndex}";
+        $url = $this->host . ":{$this->port}/{$fullIndex}";
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_HEADER, true);    // we want headers
         curl_setopt($ch, CURLOPT_NOBODY, true);    // we don't need body
@@ -416,7 +430,7 @@ class Elasticsearch extends \app\inc\Controller
 
         if ($insert == "t") {
             $sql = "SELECT * FROM {$fullTable}";
-            $api = new \app\models\Sql_to_es("4326");
+            $api = new Sql_to_es("4326");
             $api->execQuery("set client_encoding='UTF8'", "PDO");
             $res = $api->runSql($sql, $index, $type, $priKey, $db);
             if (!$res["success"]) {
@@ -475,7 +489,7 @@ class Elasticsearch extends \app\inc\Controller
         }
 
         $sql = "SELECT * FROM {$fullTable} WHERE \"{$priKey}\"='{$id}'";
-        $api = new \app\models\Sql_to_es("4326");
+        $api = new Sql_to_es("4326");
         $api->execQuery("set client_encoding='UTF8'", "PDO");
         $res = $api->runSql($sql, $index, $type, $priKey, $db);
         if (!$res["success"]) {

@@ -1,17 +1,30 @@
 <?php
 /**
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2023 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
- *  
+ *
  */
+
+declare(strict_types=1);
 
 namespace app\inc;
 
+use app\conf\App;
+use app\exceptions\GC2Exception;
+use app\models\Cost;
+use app\models\Database;
+use app\models\Table;
+use Error;
 use Exception;
 use PDO;
+use PDOException;
 use PDOStatement;
-use app\conf\Connection;
+use PgSql\Result;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
+use Throwable;
+use TypeError;
+
 
 /**
  * Class Model
@@ -19,62 +32,98 @@ use app\conf\Connection;
  */
 class Model
 {
-    public $postgishost;
-    public $postgisport;
-    public $postgisuser;
-    public $postgisdb;
-    public $postgispw;
-    public $connectString;
-    public $PDOerror;
-    public $db;
-    public $postgisschema;
-    public $connectionFailed;
+    public static array $PdoConnections = [];
+    public null|\PgSql\Connection $PgConnection = null;
+    public string $postgishost;
+    public string $postgisport;
+    public string $postgisuser;
+    public string $postgispw;
+    public string $postgisdb;
+    public ?string $postgisschema;
+    public ?string $theGeometry;
 
-    function __construct()
+    function __construct(public ?Connection $connection = null)
     {
-        $this->postgishost = Connection::$param['postgishost'];
-        $this->postgisport = Connection::$param['postgisport'];
-        $this->postgisuser = Connection::$param['postgisuser'];
-        $this->postgisdb = Connection::$param['postgisdb'];
-        $this->postgispw = Connection::$param['postgispw'];
-        $this->postgisschema = isset(Connection::$param['postgisschema']) ? Connection::$param['postgisschema'] : null;
+        if ($this->connection == null) {
+            $this->connection = new Connection();
+        }
+        $this->postgishost = $this->connection->host;
+        $this->postgisport = $this->connection->port;
+        $this->postgisuser = $this->connection->user;
+        $this->postgisdb = $this->connection->database;
+        $this->postgispw = $this->connection->password;
+        $this->postgisschema = $this->connection->schema;
     }
 
     /**
-     * @param PDOStatement $result
-     * @param string $result_type
-     * @return array
-     * @throws \PDOException
+     * Retrieves the PDO connection for the current database.
+     *
+     * @return PDO|null The PDO connection if it exists, or null if no connection is available for the current database.
      */
-    public function fetchRow(PDOStatement $result, $result_type = "assoc")
+    public function getPdoConnection(): ?PDO
+    {
+        $str = $this->connectString();
+        if (empty(self::$PdoConnections[$str])) {
+            return null;
+        }
+        return self::$PdoConnections[$str];
+    }
+
+    /**
+     * Sets the PDO connection for the current database.
+     *
+     * @param PDO $conn The PDO connection instance to associate with the current database.
+     *
+     * @return void
+     */
+    public function setPdoConnection(PDO $conn): void
+    {
+        self::$PdoConnections[$this->connectString()] = $conn;
+    }
+
+    /**
+     * Unsets the PDO connection for the current database.
+     *
+     * @return void
+     */
+    public function unsetPdoConnection(): void
+    {
+        unset(self::$PdoConnections[$this->connectString()]);
+    }
+
+    /**
+     * Fetches a single row from the given PDO statement result based on the specified result type.
+     *
+     * @param PDOStatement $result The PDOStatement object containing the result set to fetch from.
+     * @param string $result_type The type of result to fetch. Supported values are 'assoc' (fetch an associative array) and 'both' (both associative and numeric keys). Default is 'assoc'.
+     *
+     * @return array|null The fetched row as an associative or both associative and numeric array, or null if no row is available.
+     */
+    public function fetchRow(PDOStatement $result, string $result_type = "assoc"): ?array
     {
         $row = [];
         switch ($result_type) {
             case "assoc" :
-                try {
-                    $row = $result->fetch(PDO::FETCH_ASSOC);
-                } catch (\PDOException $e) {
-                    throw new \PDOException($e->getMessage());
-                }
+                $row = $result->fetch(PDO::FETCH_ASSOC);
                 break;
             case "both" :
                 break;
         }
-        return $row;
+        return $row ?: null;
     }
 
     /**
-     * @param PDOStatement $result
-     * @param string $result_type
-     * @return array
-     * @throws Exception
+     * Fetches all rows from a PDO statement into an array.
+     *
+     * @param PDOStatement $result The PDOStatement object containing the executed query results.
+     * @param string $result_type The fetch style for the results. Supported values are "assoc" for associative arrays,
+     * and "both" for both associative and indexed arrays. Defaults to "both".
+     *
+     * @return array The resulting array of rows fetched according to the specified fetch style.
      */
-    public function fetchAll(PDOStatement $result, $result_type = "both")
+    public function fetchAll(PDOStatement $result, string $result_type = "both"): array
     {
         $rows = [];
-        if ($this->PDOerror) {
-            throw new Exception($this->PDOerror[0]);
-        }
         switch ($result_type) {
             case "assoc" :
                 $rows = $result->fetchAll(PDO::FETCH_ASSOC);
@@ -87,47 +136,56 @@ class Model
     }
 
     /**
-     * TODO is it used?
-     * @param $result
+     * @param mixed $result
      * @return int
      */
-    public function numRows($result)
+    public function numRows(mixed $result): int
     {
-        $num = sizeof($result);
-        return $num;
+        if ($result instanceof PDOStatement) {
+            return $result->rowCount();
+        } else {
+            return sizeof($result);
+        }
     }
 
     /**
-     * @param $result
+     * @param PDOStatement $result
      */
-    public function free($result)
+    public function free(PDOStatement &$result): void
     {
         $result = NULL;
     }
 
     /**
      * @param string $table
-     * @return array|null
+     * @return array|string[]|null
      */
-    public function getPrimeryKey($table)
+    public function getPrimeryKey(string $table): ?array
     {
-        //return array("attname" => "objekt_id");
-
-        unset($this->PDOerror);
-        $query = "SELECT pg_attribute.attname, format_type(pg_attribute.atttypid, pg_attribute.atttypmod) FROM pg_index, pg_class, pg_attribute WHERE pg_class.oid = '" . $this->doubleQuoteQualifiedName($table) . "'::REGCLASS AND indrelid = pg_class.oid AND pg_attribute.attrelid = pg_class.oid AND pg_attribute.attnum = ANY(pg_index.indkey) AND indisprimary";
-        $result = $this->execQuery($query);
-
-        if (isset($this->PDOerror)) {
-            return NULL;
+        $cacheType = "prikey";
+        $cacheRel = md5($table);
+        $cacheId = $this->connection->database . "_" . $cacheRel . "_" . $cacheType;
+        if (!empty(App::$param["defaultPrimaryKey"])) {
+            return ["attname" => App::$param["defaultPrimaryKey"]];
         }
-        //if ($featureId = $this->getGeometryColumns($table, "featureid")) {
-        //    return array("attname" => $featureId);
-        //}
-
-        if (!is_array($row = $this->fetchRow($result))) { // If $table is view we bet on there is a gid field
-            return array("attname" => "gid");
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
         } else {
-            return ($row);
+            $query = "SELECT pg_attribute.attname, format_type(pg_attribute.atttypid, pg_attribute.atttypmod) FROM pg_index, pg_class, pg_attribute WHERE pg_class.oid = '" . $this->doubleQuoteQualifiedName($table) . "'::REGCLASS AND indrelid = pg_class.oid AND pg_attribute.attrelid = pg_class.oid AND pg_attribute.attnum = ANY(pg_index.indkey) AND indisprimary";
+            $result = $this->execQuery($query);
+            try {
+                if (!is_array($row = $this->fetchRow($result))) { // If $table is view we bet on there is a gid field
+                    $response = array("attname" => "gid");
+                } else {
+                    $response = $row;
+                }
+            } catch (TypeError) {
+                return null;
+            }
+            $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);
+            Cache::save($CachedString);
+            return $response;
         }
     }
 
@@ -135,16 +193,12 @@ class Model
      * @param string $table
      * @return bool|null
      */
-    public function hasPrimeryKey($table)
+    public function hasPrimeryKey(string $table): ?bool
     {
-        unset($this->PDOerror);
         $query = "SELECT pg_attribute.attname, format_type(pg_attribute.atttypid, pg_attribute.atttypmod) FROM pg_index, pg_class, pg_attribute WHERE pg_class.oid = '" . $this->doubleQuoteQualifiedName($table) . "'::REGCLASS AND indrelid = pg_class.oid AND pg_attribute.attrelid = pg_class.oid AND pg_attribute.attnum = ANY(pg_index.indkey) AND indisprimary";
         $result = $this->execQuery($query);
-
-        if (isset($this->PDOerror)) {
-            return NULL;
-        }
-        if (!is_array($row = $this->fetchRow($result))) {
+        $row = $this->fetchRow($result);
+        if (!is_array($row)) {
             return false;
         } else {
             return true;
@@ -152,112 +206,272 @@ class Model
     }
 
     /**
+     * Begins a database transaction if not already in progress.
      *
+     * @return void
      */
-    public function begin()
+    public function begin(): void
     {
-        $this->db->beginTransaction();
+        $this->connect();
+        if (!$this->getPdoConnection()->inTransaction()) {
+            $this->getPdoConnection()->beginTransaction();
+        }
     }
 
     /**
+     * Executes a prepared PDO statement with the given parameters.
+     *
+     * Rolls back any open transaction on any Throwable (not just
+     * PDOException) so a controller-level TypeError or RuntimeException
+     * can't leave a transaction hanging on a worker-shared PDO.
+     *
+     * @param PDOStatement $statement The prepared PDO statement to be executed.
+     * @param array $params An optional array of parameters to bind to the statement during execution.
+     *
+     * @return bool Always returns true if the statement executes successfully.
+     * @throws Throwable If the statement execution fails, the exception is rethrown and the transaction (if active) is rolled back when $autoRollback is true.
      *
      */
-    public function commit()
+    public function execute(PDOStatement $statement, array $params = [], bool $autoRollback = true): true
     {
-        $this->db->commit();
-        $this->db = NULL;
+        try {
+            $statement->execute(empty($params) ? null : $params);
+        } catch (Throwable $e) {
+            if ($autoRollback) {
+                $this->rollback();
+            }
+            throw $e;
+        }
+        return true;
     }
 
     /**
+     * Commits the current database transaction.
      *
+     * @return void
      */
-    public function rollback()
+    public function commit(): void
     {
-        $this->db->rollback();
-        $this->db = NULL;
+        if ($this->getPdoConnection()->inTransaction()) {
+            $this->getPdoConnection()->commit();
+        }
     }
 
     /**
-     * @param $sql
-     * @return mixed
-     * @throws \PDOException
+     * Rolls back the current database transaction.
+     *
+     * @return void
      */
-    public function prepare($sql)
+    public function rollback(): void
     {
-        if (!$this->db) {
+        if ($this->getPdoConnection()->inTransaction()) {
+            $this->getPdoConnection()->rollBack();
+        }
+    }
+
+    /**
+     * Runs $work inside a database transaction.
+     *
+     * Begins the transaction, invokes the callable, commits on success, and
+     * rolls back on any Throwable before rethrowing. Returns whatever the
+     * callable returns.
+     *
+     * @template T
+     * @param callable(): T $work
+     * @return T
+     * @throws Throwable
+     */
+    public function withTransaction(callable $work): mixed
+    {
+        $this->begin();
+        try {
+            $result = $work();
+            $this->commit();
+            return $result;
+        } catch (Throwable $e) {
+            $this->rollback();
+            throw $e;
+        }
+    }
+
+    /**
+     * Runs $work in a transactional sandbox that is always rolled back.
+     *
+     * Use this for validation, dry runs, or temp-table inspection where
+     * you need transactional semantics for the SQL itself but never want
+     * the work to persist.
+     *
+     * If the connection is already in a transaction we wrap $work in a
+     * SAVEPOINT and ROLLBACK TO it — so we don't disturb the outer
+     * transaction. Otherwise we open a fresh transaction and roll it
+     * back at the end.
+     *
+     * Returns whatever $work returns. If $work throws, the rollback still
+     * runs and the exception propagates.
+     *
+     * @template T
+     * @param callable(): T $work
+     * @return T
+     * @throws Throwable
+     */
+    public function withRollback(callable $work): mixed
+    {
+        $this->connect();
+        $pdo = $this->getPdoConnection();
+        if ($pdo->inTransaction()) {
+            $name = 'gc2_sp_' . bin2hex(random_bytes(6));
+            $pdo->exec("SAVEPOINT $name");
             try {
-                $this->connect("PDO");
-            } catch (\PDOException $e) {
-                throw new \PDOException($e->getMessage());
+                return $work();
+            } finally {
+                try {
+                    $pdo->exec("ROLLBACK TO SAVEPOINT $name");
+                    $pdo->exec("RELEASE SAVEPOINT $name");
+                } catch (Throwable $e) {
+                    error_log("withRollback savepoint cleanup failed: " . $e->getMessage());
+                }
             }
         }
-        $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->begin();
         try {
-            $stmt = $this->db->prepare($sql);
-        } catch (\PDOException $e) {
-            $this->PDOerror[] = $e->getMessage();
-            throw new \PDOException($e->getMessage());
+            return $work();
+        } finally {
+            $this->rollback();
         }
-        return $stmt;
     }
 
     /**
-     * @param string $query
-     * @param string $conn
-     * @param string $queryType
-     * @return bool|integer|PDOStatement
+     * Rolls back any open transactions on every cached PDO connection.
+     *
+     * Why: in FrankenPHP worker mode self::$PdoConnections persists between
+     * requests. If a controller throws between begin() and commit(), the
+     * transaction stays open and is inherited by the next request on the
+     * same connection. Call this in a finally around the per-request
+     * dispatch and after each worker iteration.
+     *
+     * @return void
      */
-    public function execQuery($query, $conn = "PDO", $queryType = "select")
+    public static function rollbackAllOpenTransactions(): void
+    {
+        foreach (self::$PdoConnections as $pdo) {
+            try {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+            } catch (Throwable $e) {
+                error_log("rollbackAllOpenTransactions: " . $e->getMessage());
+            }
+        }
+    }
+
+    /**
+     * Issues DISCARD ALL on every cached PDO connection.
+     *
+     * Why: in FrankenPHP worker mode the same PDO is reused across
+     * requests from the same JWT user. DISCARD ALL clears session-level
+     * state that a previous request may have left behind: temp tables,
+     * SET (non-LOCAL) GUC values, prepared statements, LISTEN channels,
+     * cached plans and sequences. This is a defense-in-depth measure
+     * intended to be called once per worker iteration, after
+     * rollbackAllOpenTransactions(); DISCARD ALL itself cannot run in
+     * an open transaction.
+     *
+     * Failures (dead connection, PgBouncer rejecting it in transaction
+     * pooling mode, etc.) are logged and skipped — the next real query
+     * will re-establish the connection if needed.
+     *
+     * @return void
+     */
+    public static function resetSessionStateAllConnections(): void
+    {
+        foreach (self::$PdoConnections as $pdo) {
+            try {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                $pdo->exec('DISCARD ALL');
+            } catch (Throwable $e) {
+                error_log("resetSessionStateAllConnections: " . $e->getMessage());
+            }
+        }
+    }
+
+    /**
+     * Prepares an SQL statement for execution.
+     *
+     * @param string $sql The SQL query to prepare.
+     *
+     * @return PDOStatement The prepared PDO statement.
+     * @throws Throwable If an error occurs while preparing the statement.
+     */
+    public function prepare(string $sql): PDOStatement
+    {
+        $this->connect();
+        $this->getPdoConnection()->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        try {
+            return $this->getPdoConnection()->prepare($sql);
+        } catch (Throwable $e) {
+            $this->rollback();
+            throw $e;
+        }
+    }
+
+    /**
+     * Executes the provided query using the specified connection type and query type.
+     *
+     * @param string $query The SQL query to be executed.
+     * @param string $conn The database connection type to use. Defaults to "PDO". Supported values are "PDO" and "PG".
+     * @param string $queryType The type of SQL query to be executed. Defaults to "select". Supported values are "select" and "transaction".
+     *
+     * @return PDOStatement|int|Result|null The result of the query execution. Returns a PDOStatement object for "select" queries using "PDO", an integer for "transaction" queries using "PDO", or the result resource for "PG". Returns null if no result is available.
+     *
+     * @throws PDOException If a PDO query execution fails during a "transaction" type and the exception handling process is triggered.
+     */
+    public function execQuery(string $query, string $conn = "PDO", string $queryType = "select"): PDOStatement|int|null|Result
     {
         $result = null;
         switch ($conn) {
             case "PG" :
-                if (!$this->db) {
-                    $this->connect("PG");
+                $this->connect("PG");
+                $result = pg_query($this->PgConnection, $query);
+                if (!$result) {
+                    throw new PDOException(pg_last_error($this->PgConnection));
                 }
-                $result = pg_query($this->db, $query);
-                return ($result);
                 break;
             case "PDO" :
-                if (!$this->db) {
-                    try {
-                        $this->connect("PDO");
-                    } catch (\PDOException $e) {
-                        throw new \PDOException($e->getMessage());
-                    }
-                }
-                if ($this->connectionFailed) {
-                    return false;
-                }
+                $this->connect();
                 try {
-                    $this->db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                    $this->getPdoConnection()->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
                     switch ($queryType) {
                         case "select" :
                             // Return PDOStatement object
-                            $result = $this->db->query($query);
+                            $result = $this->getPdoConnection()->query($query);
                             break;
                         case "transaction" :
-                            // Return interger
-                            $result = $this->db->exec($query);
+                            // Return integer
+                            $result = $this->getPdoConnection()->exec($query);
                     }
-                } catch (\PDOException $e) {
-                    $this->PDOerror[] = $e->getMessage();
+                } catch (Throwable $e) {
+                    $this->rollBack();
+                    throw $e;
                 }
-                return ($result);
                 break;
         }
+        return !empty($result) ? $result : null;
     }
 
     /**
      * @param string $q
-     * @return array
+     * @return array|null
      */
-    public function sql($q)
+    public function sql(string $q): ?array
     {
         $response = [];
+        $fieldsForStore = [];
+        $columnsForGrid = [];
         $firstRow = false;
         $result = $this->execQuery($q);
-        while ($row = $this->fetchRow($result, "assoc")) {
+        while ($row = $this->fetchRow($result)) {
             if (!$firstRow) {
                 $firstRow = $row;
             }
@@ -276,364 +490,1627 @@ class Model
         return $response;
     }
 
-    public function getMetaData($table, $temp = false)
+    /**
+     * @param string $table
+     * @param bool $temp
+     * @param bool $restriction
+     * @param array<array>|null $restrictions
+     * @param string|null $cacheKey
+     * @param bool $getEnums
+     * @param bool $lookupForeignTables
+     * @return array
+     * @throws GC2Exception
+     * @throws PhpfastcacheInvalidArgumentException
+     * @throws Throwable
+     */
+    public function getMetaData(string $table, bool $temp = false, bool $restriction = true, ?array $restrictions = null, ?string $cacheKey = null, bool $getEnums = true, bool $lookupForeignTables = true): array
     {
-        $arr = array();
-        preg_match("/^[\w'-]*\./", $table, $matches);
-        $_schema = $matches[0];
-
-        preg_match("/[\w'-]*$/", $table, $matches);
-        $_table = $matches[0];
-
-        if (!$_schema) {
-            $_schema = $this->postgisschema;
+        $_schema = sizeof(explode(".", $table)) > 1 ? explode(".", $table)[0] : null;
+        $_table = sizeof(explode(".", $table)) > 1 ? explode(".", $table)[1] : $table;
+        if (!$temp) {
+            if (!$_schema) {
+                throw new GC2Exception("Schema must be provided in getMetaData for non-temp tables", 400);
+            } else {
+                $_schema = str_replace(".", "", $_schema);
+            }
         } else {
-            $_schema = str_replace(".", "", $_schema);
+            $_schema = null;
         }
-        $sql = "SELECT
-                  attname                          AS column_name,
-                  attnum                           AS ordinal_position,
-                  atttypid :: REGTYPE              AS udt_name,
-                  attnotnull                       AS is_nullable,
-                  format_type(atttypid, atttypmod) AS full_type
-                FROM pg_attribute
-                WHERE attrelid = :table :: REGCLASS
-                        AND attnum > 0
-                        AND NOT attisdropped";
+        $cacheType = "metadata";
+        $cacheRel = md5($cacheKey ?: $table);
+        $cacheId = $this->connection->database . "_" . $cacheRel . "_" . $cacheType . "_" . ($temp ? 'temp' : 'notTemp') . "_" . ($restriction ? 'restriction' : 'notRestriction') . "_" . ($getEnums ? 'enums' : 'notEnums') . "_" . ($restrictions ? 'restrictions_' . md5(serialize($restrictions)) : 'noRestrictions');
+        $CachedString = Cache::getItem($cacheId);
 
-
-        try {
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
+        } else {
+            $arr = [];
+            if (!$temp) {
+                $primaryKey = $this->getPrimeryKey($_schema . '.' . $_table)['attname'];
+            } else {
+                $primaryKey = $this->getPrimeryKey($_table)['attname'];
+            }
+            $foreignConstrains = $this->getForeignConstrains($_schema, $_table)["data"];
+            $checkConstrains = $this->getConstrains($_schema, $_table, 'c')["data"];
+            $sql = "SELECT
+                        attname                          AS column_name,
+                        attnum                           AS ordinal_position,
+                        atttypid :: REGTYPE              AS udt_name,
+                        typname,
+                        attnotnull                       AS not_null,
+                        format_type(atttypid, atttypmod) AS full_type,
+                        pg_get_expr(d.adbin, d.adrelid)  AS default_value,
+                    
+                        a.attidentity                    AS attidentity,
+                        CASE a.attidentity
+                            WHEN 'a' THEN true
+                            WHEN 'd' THEN true
+                            ELSE false
+                            END                              AS is_identity,
+                        CASE a.attidentity
+                            WHEN 'a' THEN 'always'
+                            WHEN 'd' THEN 'by default'
+                            ELSE NULL
+                            END                              AS identity_generation,
+                    
+                        CASE
+                            when atttypid in (1043) then
+                                atttypmod-4
+                            ELSE null       end       AS character_maximum_length
+                            ,
+                        CASE atttypid
+                            WHEN 21 /*int2*/ THEN 16
+                            WHEN 23 /*int4*/ THEN 32
+                            WHEN 20 /*int8*/ THEN 64
+                            WHEN 1700 /*numeric*/ THEN
+                                CASE WHEN atttypmod = -1
+                                         THEN null
+                                     ELSE ((atttypmod - 4) >> 16) & 65535     -- calculate the precision
+                                    END
+                            WHEN 700 /*float4*/ THEN 24 /*FLT_MANT_DIG*/
+                            WHEN 701 /*float8*/ THEN 53 /*DBL_MANT_DIG*/
+                            ELSE null
+                            END   AS numeric_precision,
+                        CASE
+                            WHEN atttypid IN (21, 23, 20) THEN 0
+                            WHEN atttypid IN (1700) THEN
+                                CASE
+                                    WHEN atttypmod = -1 THEN null
+                                    ELSE (atttypmod - 4) & 65535            -- calculate the scale
+                                    END
+                            ELSE null
+                            END AS numeric_scale
+                            ,
+                        case
+                            when attlen <> -1 then attlen
+                            when atttypid in (1043, 25) then information_schema._pg_char_octet_length(information_schema._pg_truetypid(a.*, t.*), information_schema._pg_truetypmod(a.*, t.*))
+                            end as max_bytes
+                    
+                    FROM pg_attribute a
+                             join pg_type t on atttypid = t.oid
+                             left join pg_catalog.pg_attrdef d ON (a.attrelid, a.attnum) = (d.adrelid, d.adnum)
+                    
+                    WHERE attrelid = :table :: REGCLASS
+                      AND attnum > 0
+                      AND NOT attisdropped";
             $res = $this->prepare($sql);
             if ($temp) {
-                $res->execute(array("table" => $table));
+                $this->execute($res, array("table" => "\"" . $table . "\""));
             } else {
-                $res->execute(array("table" => $_schema . "." . $_table));
+                $this->execute($res, array("table" => "\"" . $_schema . "\".\"" . $_table . "\""));
             }
-        } catch (\PDOException $e) {
-            $response['success'] = false;
-            $response['message'] = $e->getMessage();
-            $response['code'] = 401;
-            return $response;
-        }
-        while ($row = $this->fetchRow($res)) {
-            $arr[$row["column_name"]] = array(
-                "num" => $row["ordinal_position"],
-                "type" => $row["udt_name"],
-                "full_type" => $row['full_type'],
-                "is_nullable" => $row['is_nullable'] ? false : true,
-            );
-            // Get type and srid of geometry
-            if ($row["udt_name"] == "geometry") {
-                preg_match("/[A-Z]\w+/", $row["full_type"], $matches);
-                $arr[$row["column_name"]]["geom_type"] = $matches[0];
-                preg_match("/[0-9]+/", $row["full_type"], $matches);
-                $arr[$row["column_name"]]["srid"] = $matches[0];
+            $index = $this->getIndexes($_schema, $_table);
+            $comments = !$temp ? $this->getColumnComments($_schema, $_table) : [];
+            $fieldconf = $this->getGeometryColumns($table, "fieldconf");
+            if (!empty($fieldconf)) {
+                $fieldconf = json_decode($fieldconf);
             }
+
+
+            while ($row = $this->fetchRow($res)) {
+                $column = $row["column_name"];
+                $foreignValues = [];
+                $checkValues = [];
+                $references = [];
+                if ($restriction && !$restrictions) {
+                    foreach ($foreignConstrains as $value) {
+                        if ($column == $value["child_column"] && $value["parent_column"] != $primaryKey) {
+                            if ($getEnums && $lookupForeignTables) {
+                                $sql = "SELECT {$value["parent_column"]} FROM {$value["parent_schema"]}.{$value["parent_table"]}";
+                                $resC = $this->prepare($sql);
+                                $resC->execute();
+                                while ($rowC = $this->fetchRow($resC)) {
+                                    $foreignValues[] = ["value" => $rowC[$value["parent_column"]], "alias" => (string)$rowC[$value["parent_column"]]];
+                                }
+                            }
+                        }
+                    }
+                } elseif (isset($restrictions[$row["column_name"]]->_rel) && $restriction && $restrictions) {
+                    $references[] = $restrictions[$row["column_name"]]->_rel . "." . $restrictions[$row["column_name"]]->_value;
+                    if ($getEnums) {
+                        $rel = $restrictions[$row["column_name"]];
+                        $sql = "SELECT $rel->_value AS value, $rel->_text AS text FROM $rel->_rel";
+                        if (!empty($rel->_where)) {
+                            $sql .= " WHERE $rel->_where";
+                        }
+                        if (!empty($rel->_order)) {
+                            $sql .= " ORDER BY $rel->_order";
+                        } else {
+                            $sql .= " ORDER BY $rel->_value";
+                        }
+                        // We ignore the error here
+                        try {
+                            $resC = $this->prepare($sql);
+                            $resC->execute();
+                            while ($rowC = $this->fetchRow($resC)) {
+                                $foreignValues[] = ["value" => $rowC["value"], "alias" => (string)$rowC["text"]];
+                            }
+                        } catch (Exception $e) {
+                            error_log($e->getMessage());
+                        }
+                    }
+                } elseif ($restriction && $restrictions && isset($restrictions[$row["column_name"]]) && $restrictions[$row["column_name"]] != "*" && $getEnums) {
+                    if (is_array($restrictions[$row["column_name"]])) {
+                        foreach ($restrictions[$row["column_name"]] as $restriction) {
+                            $foreignValues[] = ["value" => $restriction, "alias" => (string)$restriction];
+                        }
+                    } elseif (is_object($restrictions[$row["column_name"]])) {
+                        foreach ($restrictions[$row["column_name"]] as $alias => $value) {
+                            $foreignValues[] = ["value" => $value, "alias" => (string)$alias];
+                        }
+                    }
+                } elseif ($restriction && isset($restrictions[$row["column_name"]]) && $restrictions[$row["column_name"]] == "*" && $getEnums) {
+                    $t = new Table($table);
+                    foreach ($t->getGroupByAsArray($column)["data"] as $value) {
+                        $foreignValues[] = ["value" => $value, "alias" => (string)$value];
+                    }
+                }
+                foreach ($foreignConstrains as $value) {
+                    if ($column == $value["child_column"]) {
+                        $references[] = $value["parent_schema"] . "." . $value["parent_table"] . "." . $value["parent_column"];
+                    }
+                }
+
+                foreach ($checkConstrains as $check) {
+                    if ($check['column_name'] == $column) {
+                        $checkValues[] = $check["con"];
+                    }
+                }
+                $tmpArr = array(
+                    "type" => $row['udt_name'],
+                    "comment" => $comments[$column],
+                    // Derived
+                    "num" => $row["ordinal_position"],
+                    "full_type" => $row['full_type'],
+                    "typname" => $row["typname"],
+                    "is_array" => (bool)preg_match("/\[]/", $row["udt_name"]),
+                    "character_maximum_length" => $row["character_maximum_length"],
+                    "numeric_precision" => $row["numeric_precision"],
+                    "numeric_scale" => $row["numeric_scale"],
+                    "max_bytes" => $row["max_bytes"],
+                    "reference" => count($references) == 0 ? null : $references,
+                    "restriction" => sizeof($foreignValues) > 0 && $restriction ? $foreignValues : null,
+                    "is_nullable" => $fieldconf->$column->is_nullable ?? null,
+                );
+
+                // The following is only set on tables
+                if (!$temp) {
+                    if ($this->isTableOrView($_schema . '.' . $_table)['data'] == "TABLE") {
+                        $enablePseudoNotNull = App::$param['enablePseudoNotNull'] ?? false;
+                        $tmpArr["is_unique"] = !empty($index["is_unique"][$row["column_name"]]);
+                        $tmpArr["is_primary"] = !empty($index["is_primary"][$row["column_name"]]);
+                        if (!$enablePseudoNotNull) $tmpArr["is_nullable"] = !$row['not_null']; // For tables, we always set this form schema, not metadata
+                        $tmpArr["default_value"] = $row['default_value'];
+                        $tmpArr["identity_generation"] = $row['identity_generation'];
+                        $tmpArr["index_method"] = !empty($index["index_method"][$row["column_name"]]) ? $index["index_method"][$row["column_name"]] : null;
+                        $tmpArr["checks"] = sizeof($checkValues) > 0 ? array_map(function ($con) {
+                            preg_match('#\((.*?)\)#', $con, $match);
+                            return $match[1];
+                        }, $checkValues) : null;
+                    }
+                }
+
+                $arr[$row["column_name"]] = $tmpArr;
+
+                // Get type and srid of geometry
+                if ($row["udt_name"] == "geometry") {
+                    preg_match("/[A-Z]\w+/", $row["full_type"], $matches);
+                    $arr[$row["column_name"]]["geom_type"] = $matches[0];
+                    preg_match("/[0-9]+/", $row["full_type"], $matches);
+                    $arr[$row["column_name"]]["srid"] = $matches[0];
+                }
+            }
+            $CachedString->set($arr)->expiresAfter(Globals::$cacheTtl);//in seconds, also accepts Datetime
+            Cache::save($CachedString);
+            return $arr;
         }
-        return ($arr);
     }
 
-    function connectString()
+    /**
+     * Builds and returns a connection string based on the current connection properties.
+     *
+     * @return string The complete connection string containing host, port, user, password, and database name.
+     */
+    public function connectString(): string
     {
-        if ($this->postgishost != "")
-            $connectString = "host=" . $this->postgishost;
-        if ($this->postgisport != "")
-            $connectString = $connectString . " port=" . $this->postgisport;
-        if ($this->postgisuser != "")
-            $connectString = $connectString . " user=" . $this->postgisuser;
-        if ($this->postgispw != "")
-            $connectString = $connectString . " password=" . $this->postgispw;
-        if ($this->postgisdb != "")
-            $connectString = $connectString . " dbname=" . $this->postgisdb;
-        return ($connectString);
+        return self::connectStringFor($this->connection);
     }
 
-    function connect($type = "PDO")
+    /**
+     * The libpq connection string for a Connection. Also the key under which
+     * the shared PDO instance for that database is cached.
+     */
+    public static function connectStringFor(Connection $connection): string
+    {
+        $connectString = "host=" . $connection->host;
+        $connectString .= " port=" . $connection->port;
+        $connectString .= " user=" . $connection->user;
+        $connectString .= " password=" . $connection->password;
+        $connectString .= " dbname=" . $connection->database;
+        return $connectString;
+    }
+
+    /**
+     * Drops the cached PDO connection for a Connection so the socket is
+     * released. The PDO cache is static and keyed per database, so a CLI
+     * script that loops over every database would otherwise keep one open
+     * connection per database for the lifetime of the process. The next
+     * Model that needs the database reconnects transparently.
+     */
+    public static function disconnect(Connection $connection): void
+    {
+        unset(self::$PdoConnections[self::connectStringFor($connection)]);
+    }
+
+    /**
+     * Establishes a database connection based on the specified connection type.
+     *
+     * @param string $type The type of connection to establish. Defaults to "PDO". Supported types are:
+     *                     - "PDO": Connect using a PDO instance.
+     *                     - "PG": Connect using the native pg_connect function.
+     *
+     * @return void
+     */
+    function connect(string $type = "PDO"): void
     {
         switch ($type) {
             case "PG" :
-                $this->db = pg_connect($this->connectString());
+                $c = pg_connect($this->connectString());
+                $this->PgConnection = $c ?: null;
                 break;
             case "PDO" :
-                try {
-                    $this->db = new PDO("pgsql:dbname={$this->postgisdb};host={$this->postgishost};" . (($this->postgisport) ? "port={$this->postgisport}" : ""), "{$this->postgisuser}", "{$this->postgispw}");
-                    $this->execQuery("set client_encoding='UTF8'", "PDO");
-                } catch (\PDOException $e) {
-                    $this->db = NULL;
-                    $this->connectionFailed = true;
-                    throw new \PDOException($e->getMessage());
+                if (empty($this->getPdoConnection()) || !$this->isPdoConnected()) {
+                    // client_encoding is passed as a libpq connection parameter rather than a
+                    // loose "SET client_encoding" after connect. A post-connect SET runs as its
+                    // own autocommit statement and, under PgBouncer transaction pooling, is not
+                    // guaranteed to stick to the backend that later serves a transaction.
+                    // client_encoding is one of the startup parameters PgBouncer tracks natively,
+                    // so setting it on the connection string is both pool-safe and per-session correct.
+                    $this->setPdoConnection(new PDO(dsn: "pgsql:dbname={$this->connection->database};host={$this->connection->host};port={$this->connection->port};client_encoding=UTF8", username: $this->connection->user, password: $this->connection->password, options: [PDO::ATTR_EMULATE_PREPARES => true]));
                 }
                 break;
         }
     }
 
-    function close()
+    /**
+     * Checks if the PDO connection is successfully established.
+     *
+     * If SELECT 1 fails while a transaction is open, the transaction may be
+     * in aborted state — every subsequent query would fail with
+     * "current transaction is aborted, commands ignored until end of
+     * transaction block". Roll back the leftover transaction and retry
+     * once before declaring the connection dead.
+     *
+     * @return bool Returns true if the PDO connection is active and responsive, otherwise false.
+     */
+    private function isPdoConnected(): bool
     {
-        $this->db = NULL;
+        $pdo = $this->getPdoConnection();
+        try {
+            // Lightweight no-op query
+            $pdo->query('SELECT 1');
+            return true;
+        } catch (PDOException $e) {
+            if ($pdo->inTransaction()) {
+                try {
+                    $pdo->rollBack();
+                    $pdo->query('SELECT 1');
+                    return true;
+                } catch (PDOException $e2) {
+                    error_log("PDO connection unrecoverable after rollback: " . $e2->getMessage());
+                    return false;
+                }
+            }
+            error_log("PDO connection failed: " . $e->getMessage());
+            return false;
+        }
     }
 
-    function quote($str)
+
+    /**
+     * Closes the current database connection by unsetting the PDO instance.
+     *
+     * @return void
+     */
+    function close(): void
     {
-        if (!$this->db) {
-            $this->connect("PDO");
-        }
-        $str = $this->db->quote($str);
+        $this->unsetPdoConnection();
+    }
+
+    /**
+     * Quotes a string for use in a database query.
+     *
+     * @param string $str The string to be quoted.
+     *
+     * @return string The quoted string, safe for use in database queries.
+     */
+    function quote(string $str): string
+    {
+        $this->connect();
+        $str = $this->getPdoConnection()->quote($str);
         return ($str);
     }
 
-    function getGeometryColumns(string $table, string $field)
+    /**
+     * @param string $table
+     * @param string $field
+     * @return mixed
+     */
+    function getGeometryColumns(string $table, string $field): mixed
     {
-        preg_match("/^[\w'-]*\./", $table, $matches);
-        $_schema = $matches[0];
-
-        preg_match("/[\w'-]*$/", $table, $matches);
-        $_table = $matches[0];
-
-        if (!$_schema) {
-            $_schema = $this->postgisschema;
+        $cacheType = "geometryColumns";
+        $cacheRel = md5($table . '_' . $field);
+        $cacheId = $this->connection->database . "_" . $cacheRel . "_" . $cacheType;
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
         } else {
-            $_schema = str_replace(".", "", $_schema);
-        }
-        $query = "SELECT * FROM settings.getColumns('f_table_name=''{$_table}'' AND f_table_schema=''{$_schema}''',
-                    'raster_columns.r_table_name=''{$_table}'' AND raster_columns.r_table_schema=''{$_schema}''')";
-
-        try {
-            $result = $this->execQuery($query);
-        } catch (\PDOException $e) {
-            throw new \PDOException($e->getMessage());
-        }
-
-        $row = $this->fetchRow($result);
-
-        if (!$row)
-            return false;
-        elseif ($row)
-            $this->theGeometry = $row['type'];
-        if ($field == 'f_geometry_column') {
-            return $row['f_geometry_column'];
-        }
-        if ($field == 'srid') {
-            return $row['srid'];
-        }
-        if ($field == 'type') {
-            $arr = (array)json_decode($row['def']);
-            if (isset($arr['geotype']) && ($arr['geotype']) && $arr['geotype'] != "Default") {
-                return $arr['geotype'];
+            $response = [];
+            $_schema = sizeof(explode(".", $table)) > 1 ? explode(".", $table)[0] : "";
+            $_table = sizeof(explode(".", $table)) > 1 ? explode(".", $table)[1] : $table;
+            if (!$_schema) {
+                $_schema = $this->postgisschema ?: "";
             } else {
-                return $row['type'];
+                $_schema = str_replace(".", "", $_schema);
             }
-        }
-        if ($field == 'tweet') {
-            return $row['tweet'];
-        }
-        if ($field == 'editable') {
-            return $row['editable'];
-        }
-        if ($field == 'authentication') {
-            return $row['authentication'];
-        }
-        if ($field == 'fieldconf') {
-            return $row['fieldconf'];
-        }
-        if ($field == 'def') {
-            return $row['def'];
-        }
-        if ($field == 'id') {
-            return $row['id'];
-        }
-        if ($field == 'elasticsearch') {
-            return $row['elasticsearch'];
-        }
-        if ($field == 'featureid') {
-            return $row['featureid'];
-        }
-        if ($field == '*') {
-            return $row;
+            $row = $this->getColumns($_schema, $_table)[0] ?? null;
+            if (!$row) {
+                return null;
+            } else {
+                $this->theGeometry = $row['type'];
+            }
+            if ($field == 'f_geometry_column') {
+                $response = $row['f_geometry_column'];
+            }
+            if ($field == 'srid') {
+                $response = $row['srid'];
+            }
+            if ($field == 'type') {
+                $arr = isset($row['def']) ? json_decode($row['def'], true) : [];
+                if (isset($arr['geotype']) && ($arr['geotype']) && $arr['geotype'] != "Default") {
+                    $response = $arr['geotype'];
+                } else {
+                    $response = $row['type'];
+                }
+            }
+            if ($field == 'tweet') {
+                $response = $row['tweet'];
+            }
+            if ($field == 'editable') {
+                $response = $row['editable'];
+            }
+            if ($field == 'authentication') {
+                $response = $row['authentication'];
+            }
+            if ($field == 'privileges') {
+                $response = $row['privileges'];
+            }
+            if ($field == 'fieldconf') {
+                $response = $row['fieldconf'];
+            }
+            if ($field == 'def') {
+                $response = $row['def'];
+            }
+            if ($field == 'id') {
+                $response = $row['id'];
+            }
+            if ($field == 'elasticsearch') {
+                $response = $row['elasticsearch'];
+            }
+            if ($field == 'featureid') {
+                $response = $row['featureid'];
+            }
+            if ($field == '*') {
+                $response = $row;
+            }
+            $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);
+            Cache::save($CachedString);
+            return $response;
         }
     }
 
-    public function toAscii($str, $replace = array(), $delimiter = '-')
-    {
-        if (!empty($replace)) {
-            $str = str_replace((array)$replace, ' ', $str);
-        }
 
+    /**
+     * Converts a given string to its ASCII representation, optionally replacing certain substrings,
+     * removing non-ASCII characters, and normalizing delimiters.
+     *
+     * @param string $str The input string to be converted to ASCII.
+     * @param array|null $replace An optional array of substrings to replace with spaces before processing.
+     * @param string $delimiter The delimiter to replace matching patterns in the string.
+     * @param string $delimiterRegex The regular expression for identifying patterns to replace with the delimiter.
+     * @param bool $skipEmail Whether to skip conversion if the input string is a valid email address. Defaults to true.
+     *
+     * @return string The ASCII-converted string with applied transformations.
+     */
+    public static function toAscii(string $str, ?array $replace = [], string $delimiter = '-', string $delimiterRegex = "/[\/_|+ -]+/", bool $skipEmail = true): string
+    {
+        if (filter_var($str, FILTER_VALIDATE_EMAIL) !== false && $skipEmail && empty(App::$param['dontUseEmailForSubusers'])) {
+            return $str;
+        }
+        if (!empty($replace)) {
+            $str = str_replace($replace, ' ', $str);
+        }
         $clean = iconv('UTF-8', 'ASCII//TRANSLIT', $str);
         $clean = preg_replace("/[^a-zA-Z0-9\/_|+ -]/", '', $clean);
         $clean = strtolower(trim($clean, '-'));
-        $clean = preg_replace("/[\/_|+ -]+/", $delimiter, $clean);
-
+        $clean = preg_replace($delimiterRegex, $delimiter, $clean);
         return $clean;
     }
 
     /**
      * Does NOT work with period in schema name.
-     * @param $table
-     * @return array
+     * @param string|null $table
+     * @return array<string,string|null>
      */
-    public function explodeTableName($table)
+    public static function explodeTableName(?string $table): array
     {
-        if (!isset(explode(".", $table)[1])) {
-            return array("schema" => null, "table" => $table);
+        if (!$table || !isset(explode(".", $table)[1])) {
+            return ["schema" => null, "table" => $table];
         }
         preg_match("/[^.]*/", $table, $matches);
         $_schema = $matches[0];
         preg_match("/(?<=\.).*/", $table, $matches);
         $_table = $matches[0];
-        return array("schema" => $_schema, "table" => $_table);
+        return ["schema" => $_schema, "table" => $_table];
     }
 
     /**
      * Returns a qualified name with double quotes like "schema"."table"
-     * @param $name
+     * @param string $name
      * @return string
      */
-    public function doubleQuoteQualifiedName($name)
+    public function doubleQuoteQualifiedName(string $name): string
     {
-        $split = $this->explodeTableName($name);
-        return "\"" . $split["schema"] . "\".\"" . $split["table"] . "\"";
+        if (str_contains($name, '.')) {
+            $split = self::explodeTableName($name);
+            $schema = $split["schema"];
+            $table = $split["table"];
+
+            // Only add quotes if not already present
+            if (!str_starts_with($schema, '"') || !str_ends_with($schema, '"')) {
+                $schema = "\"" . $schema . "\"";
+            }
+            if (!str_starts_with($table, '"') || !str_ends_with($table, '"')) {
+                $table = "\"" . $table . "\"";
+            }
+
+            return $schema . "." . $table;
+        } else {
+            // Only add quotes if not already present
+            if (!str_starts_with($name, '"') || !str_ends_with($name, '"')) {
+                return "\"" . $name . "\"";
+            }
+            return $name;
+        }
     }
 
-    private function array_push_assoc($array, $key, $value)
+    /**
+     * @param array $array
+     * @param string $key
+     * @param mixed $value
+     * @return array
+     */
+    private function array_push_assoc(array $array, string $key, mixed $value): array
     {
         $array[$key] = $value;
         return $array;
     }
 
-    public function isTableOrView($table)
-    {
-        $bits = explode(".", $table);
-
-        // Check if table
-        $sql = "SELECT count(*) AS count FROM pg_tables WHERE schemaname = '{$bits[0]}' AND tablename='{$bits[1]}'";
-        $res = $this->prepare($sql);
-        try {
-            $res->execute();
-        } catch (\PDOException $e) {
-            $this->rollback();
-            $response['success'] = false;
-            $response['message'] = $e->getMessage();
-            $response['code'] = 401;
-            return $response;
-        }
-        $row = $this->fetchRow($res);
-        if ($row["count"] > 0) {
-            $response['data'] = "TABLE";
-            $response['success'] = true;
-            return $response;
-        }
-
-        // Check if view
-        $sql = "SELECT count(*) AS count FROM pg_views WHERE schemaname = '{$bits[0]}' AND viewname='{$bits[1]}'";
-        $res = $this->prepare($sql);
-        try {
-            $res->execute();
-        } catch (\PDOException $e) {
-            $this->rollback();
-            $response['success'] = false;
-            $response['message'] = $e->getMessage();
-            $response['code'] = 401;
-            return $response;
-        }
-        $row = $this->fetchRow($res);
-        if ($row["count"] > 0) {
-            $response['data'] = "VIEW";
-            $response['success'] = true;
-            return $response;
-        }
-
-        // Check if materialized view
-        $sql = "SELECT count(*) AS count FROM pg_matviews WHERE schemaname = '{$bits[0]}' AND matviewname='{$bits[1]}'";
-        $res = $this->prepare($sql);
-        try {
-            $res->execute();
-        } catch (\PDOException $e) {
-            $this->rollback();
-            $response['success'] = false;
-            $response['message'] = $e->getMessage();
-            $response['code'] = 401;
-            return $response;
-        }
-        $row = $this->fetchRow($res);
-        if ($row["count"] > 0) {
-            $response['data'] = "MATERIALIZED VIEW";
-            $response['success'] = true;
-            return $response;
-        }
-
-        // Check if FOREIGN TABLE
-        $sql = "SELECT count(*) FROM information_schema.foreign_tables WHERE foreign_table_schema='{$bits[0]}' AND  foreign_table_name='{$bits[1]}'";
-        $res = $this->prepare($sql);
-        try {
-            $res->execute();
-        } catch (\PDOException $e) {
-            $response['success'] = false;
-            $response['message'] = $e->getMessage();
-            $response['code'] = 401;
-            return $response;
-        }
-        $row = $this->fetchRow($res);
-        if ($row["count"] > 0) {
-            $response['data'] = "FOREIGN TABLE";
-            $response['success'] = true;
-            return $response;
-        }
-
-        $response['success'] = false;
-        $response['message'] = "Relation doesn't exists";
-        $response['code'] = 406;
-        return $response;
-    }
-
     /**
-     * @return array
+     * @param string $table
+     * @return array<string, string|int|bool>
+     * @throws GC2Exception
      */
-    public function postgisVersion()
+    public function isTableOrView(string $table): array
     {
-        $response = [];
-        $sql = "SELECT PostGIS_Lib_Version()";
-        $res = $this->prepare($sql);
-        try {
-            $res->execute();
-        } catch (\PDOException $e) {
-            $response['success'] = false;
-            $response['message'] = $e->getMessage();
-            $response['code'] = 401;
-            return $response;
-        }
-        $row = $this->fetchRow($res);
-        $response['success'] = true;
-        $response['version'] = $row["postgis_lib_version"];
-        return $response;
-    }
-
-    /**
-     * @param string $t
-     * @param string $c
-     * @return array
-     */
-    public function doesColumnExist($t, $c)
-    {
-        $response = [];
-        $bits = explode(".", $t);
-        $sql = "SELECT column_name FROM information_schema.columns WHERE table_schema='{$bits[0]}' AND table_name='{$bits[1]}' and column_name='{$c}'";
-        $res = $this->prepare($sql);
-
-        try {
-            $res->execute();
-        } catch (\PDOException $e) {
-            $response['success'] = false;
-            $response['message'] = $e->getMessage();
-            $response['code'] = 401;
-            return $response;
-        }
-        $row = $this->fetchRow($res);
-        $response['success'] = true;
-        if ($row) {
-            $response['exists'] = true;
+        $cacheType = "isTableOrView";
+        $cacheRel = md5($table);
+        $cacheId = $this->connection->database . "_" . $cacheRel . "_" . $cacheType;
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
         } else {
-            $response['exists'] = false;
+            $bits = explode(".", $table);
+            // Check if table
+            $sql = "SELECT count(*) AS count FROM pg_tables WHERE schemaname = '$bits[0]' AND tablename='$bits[1]'";
+            $res = $this->prepare($sql);
+            $this->execute($res);
+            $row = $this->fetchRow($res);
+            if ($row["count"] > 0) {
+                $response['data'] = "TABLE";
+                $response['success'] = true;
+                $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);
+                Cache::save($CachedString);
+                return $response;
+
+            }
+            // Check if view
+            $sql = "SELECT count(*) AS count FROM pg_views WHERE schemaname = '$bits[0]' AND viewname='$bits[1]'";
+            $res = $this->prepare($sql);
+            $this->execute($res);
+            $row = $this->fetchRow($res);
+            if ($row["count"] > 0) {
+                $response['data'] = "VIEW";
+                $response['success'] = true;
+                $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);
+                Cache::save($CachedString);
+                return $response;
+            }
+            // Check if materialized view
+            $sql = "SELECT count(*) AS count FROM pg_matviews WHERE schemaname = '$bits[0]' AND matviewname='$bits[1]'";
+            $res = $this->prepare($sql);
+            $this->execute($res);
+            $row = $this->fetchRow($res);
+            if ($row["count"] > 0) {
+                $response['data'] = "MATERIALIZED VIEW";
+                $response['success'] = true;
+                $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);
+                Cache::save($CachedString);
+                return $response;
+            }
+            // Check if FOREIGN TABLE
+            $sql = "SELECT COUNT(*) FROM pg_catalog.pg_foreign_table ft JOIN pg_catalog.pg_class c ON ft.ftrelid = c.oid JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid WHERE n.nspname = '$bits[0]' AND c.relname = '$bits[1]'";
+            $res = $this->prepare($sql);
+            $this->execute($res);
+            $row = $this->fetchRow($res);
+            if ($row["count"] > 0) {
+                $response['data'] = "FOREIGN TABLE";
+                $response['success'] = true;
+                $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);
+                Cache::save($CachedString);
+                return $response;
+            }
+            throw new GC2Exception("Relation doesn't exists", 406, null, "RELATION_DOES_NOT_EXISTS");
+        }
+    }
+
+    /**
+     * @return array<string, int|string|bool>
+     */
+    public function postgisVersion(): array
+    {
+        $cacheType = "postgisVersion";
+        $cacheId = $cacheType;
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
+        } else {
+            $response = [];
+            $sql = "SELECT PostGIS_Lib_Version()";
+            $res = $this->prepare($sql);
+            $this->execute($res);
+            $row = $this->fetchRow($res);
+            $response['success'] = true;
+            $response['version'] = $row["postgis_lib_version"];
+            try {
+                $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);//in seconds, also accepts Datetime
+            } catch (Error $exception) {
+                error_log($exception->getMessage());
+            }
+            Cache::save($CachedString);
+            return $response;
+        }
+    }
+
+    /**
+     * @param string $table
+     * @param string $column
+     * @return array<string, int|string|bool>
+     * @throws PDOException
+     */
+    public function doesColumnExist(string $table, string $column): array
+    {
+        $cacheType = "columnExist";
+        $cacheRel = md5($table);
+        $cacheId = $this->connection->database . "_" . $cacheRel . "_" . $column . "_" . $cacheType;
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
+        } else {
+            $response = [];
+            $bits = explode(".", $table);
+            $sql = "SELECT true AS exists FROM pg_attribute WHERE attrelid = '\"$bits[0]\".\"$bits[1]\"'::regclass AND attname = '$column' AND NOT attisdropped";
+            $res = $this->prepare($sql);
+            $this->execute($res);
+            $row = $this->fetchRow($res);
+            $response['success'] = true;
+            $response['exists'] = isset($row["exists"]);
+            $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);//in seconds, also accepts Datetime
+            Cache::save($CachedString);
+            return $response;
+        }
+    }
+
+    /**
+     * @param string|null $schema
+     * @param string $table
+     * @return array
+     */
+    public function getForeignConstrains(string|null $schema, string $table): array
+    {
+        $cacheType = "foreignConstrain";
+        $cacheRel = md5($schema . "." . $table);
+        $cacheId = $this->connection->database . "_" . $cacheRel . "_" . $cacheType;
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
+        } else {
+
+            $response = [];
+            $sql = "SELECT att2.attname    AS child_column,
+                       cl.relname      AS parent_table,
+                       ns.nspname    AS parent_schema,
+                       att.attname     AS parent_column,
+                       conname
+                FROM (SELECT unnest(con1.conkey)  AS parent,
+                             unnest(con1.confkey) AS child,
+                             con1.confrelid,
+                             con1.conrelid,
+                             con1.conname,
+                             ns.nspname
+                      FROM pg_class cl
+                               JOIN pg_namespace ns ON cl.relnamespace = ns.oid
+                               JOIN pg_constraint con1 ON con1.conrelid = cl.oid
+                      WHERE cl.relname = :table
+                        AND ns.nspname = :schema
+                        AND con1.contype = 'f') con
+                         JOIN pg_attribute att ON
+                    att.attrelid = con.confrelid AND att.attnum = con.child
+                         JOIN pg_class cl ON
+                    cl.oid = con.confrelid
+                         JOIN pg_attribute att2 ON
+                    att2.attrelid = con.conrelid AND att2.attnum = con.parent
+                        JOIN  pg_namespace ns on cl.relnamespace = ns.oid";
+
+            $res = $this->prepare($sql);
+            $this->execute($res, ["table" => $table, "schema" => $schema]);
+            $rows = $this->fetchAll($res, 'assoc');
+            $response['success'] = true;
+            $response['data'] = $rows;
+            $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);
+            Cache::save($CachedString);
+            return $response;
+        }
+    }
+
+    /**
+     */
+    public function getConstrains(string|null $schema, string $table, ?string $type = null): array
+    {
+        $cacheType = "checkConstrain";
+        $cacheRel = md5($schema . "." . $table);
+        $cacheId = $this->connection->database . "_" . $cacheRel . "_" . $type . "_" . $cacheType;
+        $CachedString = Cache::getItem($cacheId);
+        $where = '';
+        $params = ["table" => $table, "schema" => $schema];
+        if ($type) {
+            $where = "AND con1.contype = :type";
+            $params = ["table" => $table, "schema" => $schema, "type" => $type];
+        }
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
+        } else {
+            $response = [];
+            $sql = "SELECT relname, nspname as schema, attname as column_name, conname, con
+                FROM (SELECT unnest(con1.conkey) AS key,
+                             con1.confrelid,
+                             con1.conrelid,
+                             con1.conname,
+                             ns.nspname,
+                             cl.relname,
+                             pg_get_constraintdef(con1.oid, true) as con
+                      FROM pg_class cl
+                               JOIN pg_namespace ns ON cl.relnamespace = ns.oid
+                               JOIN pg_constraint con1 ON con1.conrelid = cl.oid
+                      WHERE cl.relname = :table
+                        AND ns.nspname = :schema 
+                        $where) con
+                         JOIN pg_attribute att ON
+                    att.attrelid = con.conrelid AND att.attnum = con.key";
+
+            $res = $this->prepare($sql);
+            $this->execute($res, $params);
+            $rows = $this->fetchAll($res, 'assoc');
+
+            $response['success'] = true;
+            $response['data'] = $rows;
+
+            $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);//in seconds, also accepts Datetime
+            Cache::save($CachedString);
+            return $response;
+        }
+    }
+
+    /**
+     * @param string $schema
+     * @param string $table
+     * @return array
+     */
+    public function getChildTables(string $schema, string $table): array
+    {
+        $cacheType = "childTables";
+        $cacheRel = md5($schema . "." . $table);
+        $cacheId = $this->connection->database . "_" . $cacheRel . "_" . $cacheType;
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
+        } else {
+            $response = [];
+            $sql = "
+                    SELECT con.oid AS constraint_oid,
+                           con.conname AS constraint_name,
+                           sch.nspname AS schema_name,
+                           tbl.relname AS table_name,
+                           col.attname AS column_name,
+                           ftbl.relname AS foreign_table_name,
+                           fcol.attname AS foreign_column_name
+                    FROM pg_constraint con
+                    JOIN pg_class tbl ON tbl.oid = con.conrelid
+                    JOIN pg_namespace sch ON sch.oid = tbl.relnamespace
+                    JOIN pg_attribute col ON col.attrelid = tbl.oid AND col.attnum = ANY(con.conkey)
+                    JOIN pg_class ftbl ON ftbl.oid = con.confrelid
+                    JOIN pg_attribute fcol ON fcol.attrelid = ftbl.oid AND fcol.attnum = ANY(con.confkey)
+                    WHERE con.contype = 'f'
+                      AND sch.nspname = :schema
+                      AND tbl.relname = :table;
+                   ";
+
+            $res = $this->prepare($sql);
+            $this->execute($res, ["table" => $table, "schema" => $schema]);
+
+            while ($row = $this->fetchRow($res)) {
+                $response['data'][] = [
+                    "rel" => $row["schema_name"] . "." . $row["foreign_table_name"],
+                    "parent_column" => $row["column_name"],
+                    "child_column" => $row["foreign_column_name"],
+                ];
+            }
+            $response['success'] = true;
+            $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);
+            Cache::save($CachedString);
+            return $response;
+        }
+    }
+
+    /**
+     * @param string $schema
+     * @param string $table
+     * @return array
+     * @throws PDOException
+     */
+    public function getColumns(string $schema, string $table): array
+    {
+        $cacheType = "columns";
+        $cacheRel = md5($schema . "." . $table);
+        $cacheId = $this->connection->database . "_" . $cacheRel . "_" . $cacheType;
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
+        } else {
+            $sql = "SELECT * FROM settings.getColumns('f_table_schema = ''$schema'' AND f_table_name = ''$table''','raster_columns.r_table_schema = ''$schema'' AND raster_columns.r_table_name = ''$table''')";
+            $res = $this->prepare($sql);
+            $this->execute($res);
+            $rows = $this->fetchAll($res);
+            $CachedString->set($rows)->expiresAfter(Globals::$cacheTtl);//in seconds, also accepts Datetime
+            Cache::save($CachedString);
+            return $rows;
+        }
+    }
+
+    /**
+     * Counts the number of rows in a given table.
+     *
+     * @param string $schema The name of the schema.
+     * @param string $table The name of the table.
+     * @return array The number of rows in the table.
+     * @throws Exception If there is an error while executing the query.
+     */
+    public function countRows(string $schema, string $table): array
+    {
+        $sql = "SELECT count(*) AS count FROM " . $this->doubleQuoteQualifiedName($schema . "." . $table);
+        $res = $this->prepare($sql);
+        try {
+            $this->execute($res);
+            $row = $this->fetchRow($res);
+        } catch (Exception $e) {
+            $response['success'] = false;
+            $response['message'] = $e->getMessage();
+            $response['code'] = 401;
+            return $response;
+        }
+        return [
+            "success" => true,
+            "data" => $row["count"],
+        ];
+    }
+
+    /**
+     * Retrieves information about indexes for a given schema and table.
+     *
+     * @param string|null $schema The name of the schema. If null, retrieves indexes for all schemas.
+     * @param string $table The name of the table.
+     * @return array An array containing information about the indexes. The structure of the array is as follows:
+     *     - is_primary: An array that maps column names to boolean values indicating whether the column is part of a primary key.
+     *     - is_unique: An array that maps column names to boolean values indicating whether the column is part of a unique index.
+     *     - indices: An array containing the details of each index.
+     *     - index_method: An array that maps column names to an array of index methods associated with the column.
+     *
+     * @throws PDOException If there is an error executing the SQL query.
+     */
+    public function getIndexes(?string $schema, string $table): array
+    {
+        $response['is_primary'] = [];
+        $response['is_unique'] = [];
+        $response['indices'] = [];
+        $response['index_method'] = [];
+        $sql = "SELECT
+                    n.nspname AS schema,
+                    t.relname AS \"table\",
+                    c.relname AS index,
+                    a.amname AS index_method,
+                    opc.operator_classes,
+                    pg_get_indexdef(i.indexrelid) AS index_definition,
+                    att.attname AS column_name,
+                    i.indisunique                 AS is_unique,
+                    i.indisprimary                AS is_primary
+                FROM
+                    pg_catalog.pg_namespace n
+                JOIN
+                    pg_catalog.pg_class c ON c.relnamespace = n.oid
+                JOIN
+                    pg_catalog.pg_index i ON i.indexrelid = c.oid
+                JOIN
+                    pg_catalog.pg_am a ON a.oid = c.relam
+                JOIN
+                    pg_catalog.pg_class t ON t.oid = i.indrelid
+                CROSS JOIN LATERAL (
+                    SELECT ARRAY (SELECT opc.opcname
+                                 FROM unnest(i.indclass::oid[]) WITH ORDINALITY o(oid, ord)
+                                 JOIN pg_opclass opc ON opc.oid = o.oid
+                                 ORDER BY o.ord)
+                   ) opc(operator_classes)
+                JOIN
+                    pg_attribute att ON att.attnum = ANY(i.indkey) AND att.attrelid = t.oid
+                LEFT JOIN
+                    pg_constraint pkcon ON pkcon.conrelid = t.oid AND pkcon.contype = 'p' AND att.attnum = ANY(pkcon.conkey)
+                WHERE
+                    n.nspname !~ '^pg_'
+                AND
+                    c.relkind = 'i'
+                    AND n.nspname = :schema
+                AND t.relname = :table
+                ORDER BY 1, 2, 3, 4";
+        $res = $this->prepare($sql);
+        $this->execute($res, ["schema" => $schema, "table" => $table]);
+        while ($row = $this->fetchRow($res)) {
+            $response["index_method"][$row["column_name"]][] = $row["index_method"];
+            $response["is_primary"][$row["column_name"]] = !empty($response["is_primary"][$row["column_name"]]) ? $response["is_primary"][$row["column_name"]] : $row["is_primary"];
+            $response["is_unique"][$row["column_name"]] = !empty($response["is_unique"][$row["column_name"]]) ? $response["is_unique"][$row["column_name"]] : $row["is_unique"];
+            $response["indices"][] = $row;
+
         }
         return $response;
+    }
+
+    public function createView(string $statement, string $name): void
+    {
+        $sql = "CREATE VIEW " . $name . " AS " . $statement;
+        $res = $this->prepare($sql);
+        $this->execute($res);
+    }
+
+    public function createMatView(string $statement, string $name, bool $withNoData = false): void
+    {
+        $sql = "CREATE MATERIALIZED VIEW " . $name . " AS " . $statement;
+        if ($withNoData) {
+            $sql .= " WITH NO DATA";
+        }
+        $res = $this->prepare($sql);
+        $this->execute($res);
+    }
+
+    /**
+     * Retrieves the names of tables from the specified schema.
+     *
+     * @param string $schema The name of the schema from which to retrieve table names.
+     *
+     * @return array An array of table names belonging to the specified schema.
+     */
+    public function getTableNamesFromSchema(string $schema): array
+    {
+        $response = [];
+        $sql = "SELECT tablename as name FROM pg_tables WHERE schemaname = :schema";
+        $res = $this->prepare($sql);
+        $this->execute($res, ["schema" => $schema]);
+        while ($row = $this->fetchRow($res)) {
+            $response[] = $row["name"];
+        }
+        return $response;
+    }
+
+    /**
+     * Retrieves the names of views and materialized views from the specified schema.
+     *
+     * @param string $schema The name of the schema from which to retrieve the view names.
+     *
+     * @return array An array containing the names of the views and materialized views in the specified schema.
+     */
+    public function getViewNamesFromSchema(string $schema): array
+    {
+        $response = [];
+        $views = $this->getViewsFromSchema($schema);
+        foreach ($views as $v) {
+            $response[] = $v["name"];
+        }
+        return $response;
+    }
+
+    /**
+     * Retrieves views and materialized views from the specified schema.
+     *
+     * @param string $schema The name of the schema from which to fetch views and materialized views.
+     *
+     * @return array An array of views and materialized views, where each item includes:
+     *               - name: The name of the view or materialized view.
+     *               - schema: The schema to which the view or materialized view belongs.
+     *               - owner: The owner of the view or materialized view.
+     *               - ismat: A flag indicating if it is a materialized view ('t') or a regular view ('f').
+     *               - definition: The SQL definition of the view or materialized view.
+     */
+    public function getViewsFromSchema(string $schema): array
+    {
+        $response = [];
+        $sql = "SELECT viewname as name, schemaname, viewowner as owner,definition, 'f' as ismat FROM pg_views WHERE schemaname = :schema union ";
+        $sql .= "SELECT matviewname as name, schemaname, matviewowner as owner, definition, 't' as ismat FROM pg_matviews WHERE schemaname = :schema";
+        $res = $this->prepare($sql);
+        $this->execute($res, ['schema' => $schema]);
+        while ($row = $this->fetchRow($res)) {
+            $tmp = [];
+            $tmp['name'] = $row['name'];
+            $tmp['schema'] = $row['schemaname'];
+            $tmp['owner'] = $row['owner'];
+            $tmp['ismat'] = $row['ismat'];
+            $tmp['definition'] = $row['definition'];
+            $response[] = $tmp;
+        }
+        return $response;
+    }
+
+    public function getForeignTablesFromSchema(string $schema): array
+    {
+        $response = [];
+        $sql = "SELECT relname as name
+                    FROM pg_catalog.pg_foreign_table ft
+                             JOIN pg_catalog.pg_class c ON ft.ftrelid = c.oid
+                             JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+                    WHERE n.nspname = :schema";
+        $res = $this->prepare($sql);
+        $this->execute($res, ["schema" => $schema]);
+        while ($row = $this->fetchRow($res)) {
+            $response[] = $row["name"];
+        }
+        return $response;
+    }
+
+    /**
+     * Stores views from the specified schemas into the settings.views table.
+     *
+     * @param array $schemas The array of schemas from which to retrieve and store views.
+     *
+     * @return int The total number of views stored across all schemas.
+     * @throws GC2Exception If a specified schema does not exist.
+     *
+     */
+    public function storeViewsFromSchema(array $schemas): int
+    {
+        $db = new Database(connection: $this->connection);
+        $this->begin();
+        $count = 0;
+        foreach ($schemas as $schema) {
+            if (!$db->doesSchemaExist($schema)) {
+                throw new GC2Exception("Schema not found", 404, null, "SCHEMA_NOT_FOUND");
+            }
+            $views = $this->getViewsFromSchema($schema);
+            foreach ($views as $view) {
+                $sql = "INSERT INTO settings.views (name,schemaname,owner,definition,ismat,timestamp) VALUES(:name,:schemaname,:owner,:definition,:ismat,:timestamp)" .
+                    " ON CONFLICT (name,schemaname) DO UPDATE SET name=:name,schemaname=:schemaname,owner=:owner,definition=:definition,ismat=:ismat,timestamp=:timestamp";
+                $result = $this->prepare($sql);
+                $result->execute(['name' => $view['name'], 'schemaname' => $schema, 'owner' => $view['owner'], 'definition' => $view['definition'], 'ismat' => $view['ismat'], 'timestamp' => date('Y-m-d H:i:s')]);
+            }
+            $count += sizeof($views);
+        }
+        $this->commit();
+        return $count;
+    }
+
+    /**
+     * Retrieves a list of star view definitions from the specified schema.
+     *
+     * @param string $schema The name of the schema from which to retrieve star view definitions.
+     *
+     * @return array An array of star view definitions, each including the view name, schema name, modified definition, and materialization status.
+     *
+     */
+    public function getStarViewsFromStore(string $schema): array
+    {
+        ini_set('pcre.jit', 0); // So longer definitions doesn't raise a PHP PREG_JIT_STACKLIMIT_ERROR
+        $response = [];
+        $sql = "select * from settings.views where schemaname=:schemaname";
+        $result = $this->prepare($sql);
+        $result->execute(['schemaname' => $schema]);
+        $rows = $this->fetchAll($result, 'assoc');
+        foreach ($rows as $row) {
+            $tmp = [];
+            $def = $row['definition'];
+            preg_match('#(?<=FROM )(.|\n)*?((?=,)|(?=\s)|(?=;)|(?=$))#', $def, $matches);
+            $replacement = " $matches[0].*";
+            $tmp['definition'] = preg_replace('#(?<=SELECT)(.|\n)*?(?= FROM)#', $replacement, $def, 1);
+            $tmp['name'] = $row['name'];
+            $tmp['schemaname'] = $row['schemaname'];
+            $tmp['ismat'] = $row['ismat'];
+            $response[] = $tmp;
+        }
+        return $response;
+    }
+
+    /**
+     * Creates star views from the store.
+     *
+     * @param array $schemas The array of schemas to create star views from.
+     * @param array|null $targetSchemas Optional. The array of target schemas. If not provided, $schemas will be used as the target schemas.
+     * @param array|null $include Optional. The array of view names to include. Only views with these names will be created. If not provided, all views will be created.
+     *
+     * @return int The number of star views successfully created.
+     *
+     * @throws GC2Exception If the number of schemas and target schemas is different, or if a schema is not found in the database.
+     */
+    public function createStarViewsFromStore(array $schemas, ?array $targetSchemas = null, ?array $include = null): int
+    {
+        if ($targetSchemas && sizeof($schemas) != sizeof($targetSchemas)) {
+            throw new GC2Exception("Schemas and targets must have the same number of entries", 500, null, null);
+        } elseif (!$targetSchemas) {
+            $targetSchemas = $schemas;
+        }
+        $count = 0;
+        $db = new Database(connection: $this->connection);;
+        $this->begin();
+        for ($i = 0; $i < sizeof($schemas); $i++) {
+            $schema = $schemas[$i];
+            $targetSchema = $targetSchemas[$i];
+            if (!$db->doesSchemaExist($schema)) {
+                throw new GC2Exception("Schema $schema not found", 404, null, "SCHEMA_NOT_FOUND");
+            }
+            if (!$db->doesSchemaExist($targetSchema)) {
+                throw new GC2Exception("Schema $targetSchema not found", 404, null, "SCHEMA_NOT_FOUND");
+            }
+            $views = $this->getStarViewsFromStore($schema);
+            foreach ($views as $view) {
+                if ($include && !in_array($view['name'], $include)) {
+                    continue;
+                }
+                $mat = $view['ismat'] ? 'materialized' : '';
+                $name = "\"$targetSchema\".\"{$view['name']}\"";
+                $sql = "drop $mat view if exists $name";
+                $result = $this->prepare($sql);
+                $result->execute();
+                $sql = "create $mat view $name as {$view['definition']}";
+                $result = $this->prepare($sql);
+                $result->execute();
+                $count++;
+            }
+        }
+        $this->commit();
+        return $count;
+    }
+
+    /**
+     * Imports foreign schemas into target schemas using a given database server.
+     *
+     * @param array<string> $schemas The list of schemas to be imported.
+     * @param array<string> $targetSchemas The list of target schemas where the foreign schemas will be imported.
+     * @param string $server The name of the database server.
+     * @param array<string>|null $include Optional. The list of schemas to include during import. If null, all schemas will be imported.
+     *
+     * @return void
+     * @throws GC2Exception If the target schema is not found.
+     *
+     * @throws GC2Exception If the number of schemas and target schemas does not match.
+     */
+    public function importForeignSchema(array $schemas, array $targetSchemas, string $server, ?array $include): void
+    {
+        if ($targetSchemas && sizeof($schemas) != sizeof($targetSchemas)) {
+            throw new GC2Exception("Schemas and targets must have the same number of entries", 500, null, null);
+        } elseif (!$targetSchemas) {
+            $targetSchemas = $schemas;
+        }
+
+        $db = new Database(connection: $this->connection);;
+        $this->begin();
+        for ($i = 0; $i < sizeof($schemas); $i++) {
+            $schema = $schemas[$i];
+            $targetSchema = $targetSchemas[$i];
+            if (!$db->doesSchemaExist($targetSchema)) {
+                throw new GC2Exception("Schema $targetSchema not found", 404, null, "SCHEMA_NOT_FOUND");
+            }
+            $limitTo = '';
+            if ($include) {
+                $limitTo = "LIMIT TO (\"" . implode("\",\"", $include) . "\")";
+            }
+            $sql = "IMPORT FOREIGN SCHEMA $schema $limitTo FROM SERVER $server INTO $targetSchema";
+            $result = $this->prepare($sql);
+            $result->execute();
+        }
+        $this->commit();
+    }
+
+    /**
+     * Materializes foreign tables by creating materialized views in specified target schemas.
+     *
+     * @param array $schemas An array of schemas from where the foreign tables will be materialized.
+     * @param array|null $targetSchemas An array of target schemas where the materialized views will be created. If null, the target schemas will be the same as the source schemas.
+     * @param string|null $prefix Optional prefix to be added to the names of the materialized views.
+     * @param string|null $suffix Optional suffix to be added to the names of the materialized views.
+     * @param array|null $include An array of table names to be included. If provided, only the tables that are included in this array will be materialized.
+     * @return int The number of materialized views created.
+     * @throws GC2Exception If schemas and targetSchemas have different number of entries, or if a specified schema is not found.
+     */
+    public function materializeForeignTables(array $schemas, ?array $targetSchemas, ?string $prefix = '', ?string $suffix = '', ?array $include = null): int
+    {
+        if ($targetSchemas && sizeof($schemas) != sizeof($targetSchemas)) {
+            throw new GC2Exception("Schemas and targets must have the same number of entries", 500, null, null);
+        } elseif (!$targetSchemas) {
+            $targetSchemas = $schemas;
+        }
+
+        $db = new Database(connection: $this->connection);
+        $this->begin();
+        $count = 0;
+        for ($i = 0; $i < sizeof($schemas); $i++) {
+            $schema = $schemas[$i];
+            $targetSchema = $targetSchemas[$i];
+            if (!$db->doesSchemaExist($schema)) {
+                throw new GC2Exception("Schema $schema not found", 404, null, "SCHEMA_NOT_FOUND");
+            }
+            if (!$db->doesSchemaExist($targetSchema)) {
+                throw new GC2Exception("Schema $targetSchema not found", 404, null, "SCHEMA_NOT_FOUND");
+            }
+            if (!$prefix) {
+                $prefix = '';
+            }
+            if (!$suffix) {
+                $suffix = '';
+            }
+            $foreignTables = $this->getForeignTablesFromSchema($schema);
+            $count = 0;
+            foreach ($foreignTables as $foreignTable) {
+                $name = "\"$targetSchema\".\"$prefix$foreignTable$suffix\"";
+                if ($include && !in_array($foreignTable, $include)) {
+                    continue;
+                }
+                $sql = "drop materialized view if exists $name";
+                $result = $this->prepare($sql);
+                $result->execute();
+                $sql = "create materialized view $name as select * from \"$schema\".\"$foreignTable\" with no data";
+                $result = $this->prepare($sql);
+                $result->execute();
+                $count++;
+            }
+        }
+        $this->commit();
+        return $count;
+    }
+
+    public function refreshMatViews(array $schemas, ?array $include = null): int
+    {
+        $count = 0;
+        foreach ($schemas as $schema) {
+            $views = $this->getViewsFromSchema($schema);
+            foreach ($views as $view) {
+                if ($include && !in_array($view['name'], $include)) {
+                    continue;
+                }
+                if ($view['ismat'] == 't') {
+                    $sql = "refresh materialized view \"$schema\".\"{$view['name']}\"";
+                    $result = $this->prepare($sql);
+                    $result->execute();
+                    $count++;
+                }
+            }
+        }
+        return $count;
+    }
+
+    /**
+     * Deletes foreign tables from the specified schemas.
+     *
+     * @param array $schemas The array of schemas from which to delete the foreign tables.
+     * @param array|null $include An optional array of foreign tables to include. If provided, only the specified foreign tables will be deleted.
+     *
+     * @return int The number of foreign tables deleted.
+     * @throws GC2Exception If a specified schema does not exist.
+     *
+     */
+    public function deleteForeignTables(array $schemas, ?array $include = null): int
+    {
+        $db = new Database(connection: $this->connection);
+        $this->begin();
+        $count = 0;
+        foreach ($schemas as $schema) {
+            if (!$db->doesSchemaExist($schema)) {
+                throw new GC2Exception("Schema $schema not found", 404, null, "SCHEMA_NOT_FOUND");
+            }
+            $foreignTables = $this->getForeignTablesFromSchema($schema);
+            $count = 0;
+            foreach ($foreignTables as $foreignTable) {
+                if ($include && !in_array($foreignTable, $include)) {
+                    continue;
+                }
+                $sql = "drop foreign table \"$schema\".\"$foreignTable\" cascade";
+                $result = $this->prepare($sql);
+                $result->execute();
+                $count++;
+            }
+        }
+        $this->commit();
+        return $count;
+    }
+
+    /**
+     * Retrieves statistics about database tables including their size, row count, and associated costs.
+     *
+     * The method compiles a list of tables and their respective schema names, sizes in various formats
+     * (human-readable and bytes), row counts, and the total cumulative size of all tables.
+     * Additionally, it includes the storage cost associated with the database.
+     *
+     * @return array<string, mixed> An array containing:
+     *                              - "tables" (array<int, array<string, mixed>>): List of table statistics.
+     *                              - "totalSize" (int): Total size in bytes of all tables.
+     *                              - "totalSizePretty" (string): Human-readable total size of all tables.
+     *                              - "numberOfTables" (int): Number of tables.
+     *                              - "cost" (float): Storage cost of the database.
+     */
+    public function getStats(): array
+    {
+        $sql = "SELECT distinct i.relname                                     as \"table_name\",
+                                i.schemaname                                  as \"schema_name\",
+                                pg_size_pretty(pg_total_relation_size(relid)) as \"total_size\",
+                                pg_total_relation_size(relid)                 as \"total_size_bytes\",
+                                pg_size_pretty(pg_relation_size(relid))       as \"table_size\",
+                                pg_relation_size(relid)                       as \"table_size_bytes\",
+                                pg_size_pretty(pg_indexes_size(relid))        as \"indices_size\",
+                                pg_indexes_size(relid)                        as \"indices_size_bytes\",
+                                reltuples::bigint                                \"row_count\"
+                FROM pg_stat_all_tables i
+                         join pg_class c ON i.relid = c.oid
+                WHERE i.schemaname NOT IN ('information_schema', 'settings')
+                  AND i.schemaname NOT LIKE 'pg_%' and i.relname != 'spatial_ref_sys'";
+
+        $res = $this->prepare($sql);
+        $this->execute($res);
+        $totalSize = 0;
+        $tables = [];
+        foreach ($this->fetchAll($res, 'assoc') as $table) {
+            $tables[] = $table;
+            $totalSize += $table['total_size_bytes'];
+        }
+        $sql = "select pg_size_pretty($totalSize::bigint) as p";
+        $res = $this->prepare($sql);
+        $this->execute($res);
+        $row = $res->fetchAll();
+        try {
+            $cost = (new Cost(connection: $this->connection))->getCost();
+        } catch (PDOException) {
+            $cost = 0.0;
+        }
+        return [
+            "tables" => $tables,
+            "total_size" => $row[0]['p'],
+            "total_size_byte" => $totalSize,
+            "number_of_tables" => count($tables),
+            "cost" => $cost,
+        ];
+    }
+
+    /**
+     * Retrieves the total number of tables in the Postgres database.
+     *
+     * The method executes a SQL query to retrieve the count of tables from the "pg_tables" system catalog table.
+     * The query filters out tables from certain system schemas and excludes specific tables.
+     *
+     * @return int The total number of tables in the database.
+     */
+    public function getNumTables(): int
+    {
+        $sql = "select count(*) as c
+                from pg_tables
+                WHERE schemaname NOT IN ('information_schema', 'settings')
+                  AND schemaname NOT LIKE 'pg_%'
+                  and tablename != 'spatial_ref_sys'";
+
+        $res = $this->prepare($sql);
+        $this->execute($res);
+        return $res->fetchColumn();
+    }
+
+    /**
+     * Checks if a relation (table, view, etc.) exists in the database.
+     * @param string $rel The name of the relation to check.
+     * @return bool True if the relation exists, false otherwise.
+     */
+    public function doesRelationExists(string $rel): bool
+    {
+        $parts = $this->explodeTableName($rel);
+        $schema = $parts['schema'] ? str_replace('.', '', $parts['schema']) : null;
+        $table = $parts['table'];
+        $sql = "SELECT EXISTS (
+                    SELECT 1 FROM pg_catalog.pg_class c
+                    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                    WHERE c.relname = :table
+                    AND (:schema::text IS NULL OR n.nspname = :schema)
+                    AND c.relkind IN ('r','v','m','f','p')
+                ) AS exists";
+        $res = $this->prepare($sql);
+        $res->execute(['table' => $table, 'schema' => $schema]);
+        return (bool)$res->fetchColumn();
+    }
+
+    /**
+     * @param string $schema
+     * @param string $table
+     * @return array
+     * @throws PDOException
+     */
+    protected function getColumnComments(string $schema, string $table): array
+    {
+        $cacheType = 'colComments';
+        $cacheRel = md5($schema . '.' . $table);
+        $cacheId = $this->connection->database . '_' . $cacheRel . '_' . $cacheType;
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
+        } else {
+            $sql = "SELECT
+                    a.attname    AS column_name,
+                    pgd.description AS column_comment
+                FROM pg_class c
+                         JOIN pg_namespace n ON n.oid = c.relnamespace
+                         JOIN pg_attribute a ON a.attrelid = c.oid
+                         LEFT JOIN pg_description pgd
+                                   ON pgd.objoid = c.oid
+                                       AND pgd.objsubid = a.attnum
+                WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')  -- table, partitioned table, view, mat. view, foreign table
+                  AND a.attnum > 0                           -- skip system columns
+                  AND NOT a.attisdropped                     -- skip dropped columns
+                  AND n.nspname = :schema
+                  AND c.relname = :table
+                ORDER BY a.attnum";
+
+            $res = $this->prepare($sql);
+            $this->execute($res, ['table' => $table, 'schema' => $schema]);
+            $comments = [];
+            foreach ($res->fetchAll(PDO::FETCH_ASSOC) as $row) {
+                $comments[$row['column_name']] = $row['column_comment'];
+            }
+            $CachedString->set($comments)->expiresAfter(Globals::$cacheTtl);
+            Cache::save($CachedString);
+            return $comments;
+        }
+    }
+
+    /**
+     * @param string $schema
+     * @param string $table
+     * @return string|null
+     * @throws PDOException
+     */
+    public function getTableComment(string $schema, string $table): ?string
+    {
+        $cacheType = 'tableComment';
+        $cacheRel = md5($schema . '.' . $table);
+        $cacheId = $this->connection->database . '_' . $cacheRel . '_' . $cacheType;
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
+        } else {
+            $sql = "SELECT
+                    obj_description(c.oid, 'pg_class') AS comment
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                  AND n.nspname = :schema
+                  AND c.relname = :table";
+
+            $res = $this->prepare($sql);
+            $this->execute($res, ['table' => $table, 'schema' => $schema]);
+            $comment = $res->fetchColumn();
+            $CachedString->set($comment)->expiresAfter(Globals::$cacheTtl);
+            Cache::save($CachedString);
+            return $comment;
+        }
+    }
+
+    /**
+     * Retrieves information about sequences in the specified schema.
+     *
+     * @param string $schema The name of the schema for which to retrieve sequence details.
+     *
+     * @return array An associative array containing sequence information. The 'data' key contains an array
+     *               of sequences with their details, and the 'success' key indicates the operation status.
+     */
+    public function getSequences(string $schema): array
+    {
+        $sql = "WITH seq AS (
+                        SELECT *
+                        FROM pg_sequences
+                        WHERE schemaname = :schema
+                    )
+                    
+                    SELECT
+                        s.sequencename AS name,
+                        s.start_value,
+                        s.min_value,
+                        s.max_value,
+                        s.data_type,
+                        s.increment_by,
+                        s.cache_size,
+                        s.schemaname||'.'||tbl.relname||'.'||att.attname as owned_by
+                    FROM seq s
+                             JOIN pg_class c
+                                  ON c.relname = s.sequencename
+                             JOIN pg_namespace n
+                                  ON n.oid = c.relnamespace AND n.nspname = s.schemaname
+                             LEFT JOIN pg_depend d
+                                       ON d.objid = c.oid AND d.deptype = 'a'
+                             LEFT JOIN pg_class tbl
+                                       ON tbl.oid = d.refobjid
+                             LEFT JOIN pg_attribute att
+                                       ON att.attrelid = tbl.oid AND att.attnum = d.refobjsubid
+                    ORDER BY s.sequencename";
+        $res = $this->prepare($sql);
+        $this->execute($res, ['schema' => $schema]);
+        $rows = $this->fetchAll($res, 'assoc');
+        $response['success'] = true;
+        $response['data'] = $rows;
+        return $response;
+
+    }
+
+    /**
+     * Creates a new sequence in the specified schema with the provided configuration.
+     *
+     * @param string $name The name of the sequence to be created.
+     * @param string $schema The schema in which the sequence will be created.
+     * @param array $ddl The definition parameters for the sequence, such as data type, increment value, start value, minimum and maximum values, and cache size.
+     * @param bool $withOwner Determines whether the sequence should be associated with an owner. If false, the sequence will not have an owner.
+     *
+     * @return string The name of the created sequence after processing.
+     */
+    public function createSequence(string $name, string $schema, array $ddl, bool $withOwner = true): string
+    {
+        if (!isset($ddl['data_type'])) $ddl['data_type'] = 'bigint';
+        if (!isset($ddl['increment_by'])) $ddl['increment_by'] = '1';
+        if (!isset($ddl['start_value'])) $ddl['start_value'] = '1';
+        if (!isset($ddl['cache_size'])) $ddl['cache_size'] = '1';
+        if (!isset($ddl['owned_by']) || !$withOwner) $ddl['owned_by'] = 'NONE';
+
+        $ddl['min_value'] = isset($ddl['min_value']) ? "MINVALUE {$ddl['min_value']}" : 'NO MINVALUE';
+        $ddl['max_value'] = isset($ddl['max_value']) ? "MAXVALUE {$ddl['max_value']}" : 'NO MAXVALUE';
+
+        $name = self::toAscii(str: $name, delimiterRegex: "/[\/|+ -]+/");
+        $sql = "CREATE SEQUENCE $schema.$name AS {$ddl['data_type']}
+        INCREMENT BY {$ddl['increment_by']}
+        {$ddl['min_value']}
+        {$ddl['max_value']}
+        START WITH {$ddl['start_value']}
+        CACHE {$ddl['cache_size']}
+        OWNED BY {$ddl['owned_by']}";
+        $res = $this->prepare($sql);
+        $this->execute($res);
+        return $name;
+    }
+
+    /**
+     * Alters the properties of a database sequence.
+     *
+     * @param string $name The current name of the sequence to be altered.
+     * @param string $schema The schema in which the sequence exists.
+     * @param array $ddl An associative array containing the modifications to be applied to the sequence.
+     *                    Supported keys include:
+     *                    - `name` (string): Rename the sequence to a new name.
+     *                    - `data_type` (string): Specify a new data type for the sequence.
+     *                    - `increment_by` (int): Change the increment value for the sequence.
+     *                    - `min_value` (int|null): Set a new minimum value for the sequence, or `null` to reset to no minimum value.
+     *                    - `max_value` (int|null): Set a new maximum value for the sequence, or `null` to reset to no maximum value.
+     *                    - `start_value` (int): Define a new starting value for the sequence.
+     *                    - `restart_value` (int): Restart the sequence at a specified value.
+     *                    - `cache_size` (int): Set the number of sequence values to cache.
+     *                    - `owned_by` (string): Define the table column that owns the sequence.
+     *
+     * @return string The final name of the sequence after any potential renaming.
+     */
+    public function alterSequence(string $name, string $schema, array $ddl): string
+    {
+        $name = self::toAscii(str: $name, delimiterRegex: "/[\/|+ -]+/");
+
+        // Handle rename if name differs
+        if (isset($ddl['name']) && $ddl['name'] !== $name) {
+            $newName = self::toAscii(str: $ddl['name'], delimiterRegex: "/[\/|+ -]+/");
+            $sql = "ALTER SEQUENCE $schema.$name RENAME TO $newName";
+            $res = $this->prepare($sql);
+            $this->execute($res);
+            $name = $newName;
+        }
+
+        $alterParts = [];
+
+        if (isset($ddl['data_type'])) {
+            $alterParts[] = "AS {$ddl['data_type']}";
+        }
+        if (isset($ddl['increment_by'])) {
+            $alterParts[] = "INCREMENT BY {$ddl['increment_by']}";
+        }
+        if (isset($ddl['min_value'])) {
+            $alterParts[] = "MINVALUE {$ddl['min_value']}";
+        } elseif (array_key_exists('min_value', $ddl) && $ddl['min_value'] === null) {
+            $alterParts[] = "NO MINVALUE";
+        }
+        if (isset($ddl['max_value'])) {
+            $alterParts[] = "MAXVALUE {$ddl['max_value']}";
+        } elseif (array_key_exists('max_value', $ddl) && $ddl['max_value'] === null) {
+            $alterParts[] = "NO MAXVALUE";
+        }
+        if (isset($ddl['start_value'])) {
+            $alterParts[] = "START WITH {$ddl['start_value']}";
+        }
+        if (isset($ddl['restart_value'])) {
+            $alterParts[] = "RESTART WITH {$ddl['restart_value']}";
+        }
+        if (isset($ddl['cache_size'])) {
+            $alterParts[] = "CACHE {$ddl['cache_size']}";
+        }
+        if (isset($ddl['owned_by'])) {
+            $alterParts[] = "OWNED BY {$ddl['owned_by']}";
+        }
+
+        if (!empty($alterParts)) {
+            $sql = "ALTER SEQUENCE $schema.$name " . implode(' ', $alterParts);
+            $res = $this->prepare($sql);
+            $this->execute($res);
+        }
+        return $name;
+    }
+
+    /**
+     * Deletes a sequence from the database.
+     *
+     * @param string $name The name of the sequence to be deleted.
+     * @param string $schema
+     * @return void
+     */
+    public function deleteSequence(string $name, string $schema): void
+    {
+        $sql = "DROP SEQUENCE $schema.$name";
+        $res = $this->prepare($sql);
+        $this->execute($res);
     }
 }

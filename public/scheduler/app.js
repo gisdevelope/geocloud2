@@ -12,6 +12,11 @@
  *
  * Do NOT hand edit this file.
  */
+Ext.Ajax.timeout = 3600000;
+Ext.override(Ext.data.proxy.Ajax, {timeout: Ext.Ajax.timeout});
+Ext.override(Ext.data.Connection, {timeout: Ext.Ajax.timeout});
+Ext.override(Ext.form.action.Action, {timeout: Ext.Ajax.timeout / 1000});
+
 
 // @require @packageOverrides
 Ext.Loader.setConfig({
@@ -37,7 +42,7 @@ Ext.application({
     ],
     name: 'MyApp',
 
-    launch: function() {
+    launch: function () {
         Ext.create('MyApp.view.MyViewport');
     }
 

@@ -1,0 +1,339 @@
+<?php
+/**
+ * @author     Martin Høgh <mh@mapcentia.com>
+ * @copyright  2013-2026 MapCentia ApS
+ * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
+ *
+ */
+
+namespace app\api\v4\controllers;
+
+use app\api\v4\AbstractApi;
+use app\api\v4\AcceptableAccepts;
+use app\api\v4\AcceptableContentTypes;
+use app\api\v4\AcceptableMethods;
+use app\api\v4\Controller;
+use app\api\v4\Responses\Response;
+use app\api\v4\Scope;
+use app\exceptions\GC2Exception;
+use app\inc\Connection;
+use app\models\Database;
+use app\inc\Input;
+use app\inc\Route2;
+use app\models\Table as TableModel;
+use Exception;
+use Override;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
+use Psr\Cache\InvalidArgumentException;
+use OpenApi\Attributes as OA;
+use Symfony\Component\Validator\Constraints as Assert;
+
+
+#[OA\Info(version: '1.0.0', title: 'GC2 API', contact: new OA\Contact(email: 'mh@mapcentia.com'))]
+#[OA\Schema(
+    schema: "Schema",
+    description: "Schema definition, including tables and sequences.",
+    required: ["name"],
+    properties: [
+        new OA\Property(
+            property: "name",
+            title: "Name",
+            description: "Schema name.",
+            type: "string",
+            example: "my-schema",
+        ),
+        new OA\Property(
+            property: "_table_count",
+            title: "Table count",
+            description: "Read-only. Number of tables, views and materialized views in the schema (what /tables lists). Always present, also with namesOnly=true, so a client can list schemas without loading every table.",
+            type: "integer",
+            readOnly: true,
+            example: 12,
+        ),
+        new OA\Property(
+            property: "tables",
+            title: "Tables",
+            description: "Tables in the schema.",
+            type: "array",
+            items: new OA\Items(ref: "#/components/schemas/Table"),
+        ),
+        new OA\Property(
+            property: "sequences",
+            title: "Sequences",
+            description: "Sequences in the schema.",
+            type: "array",
+            items: new OA\Items(ref: "#/components/schemas/Sequence"),
+        ),
+    ],
+    type: "object"
+)]
+#[OA\SecurityScheme(securityScheme: 'bearerAuth', type: 'http', name: 'bearerAuth', in: 'header', bearerFormat: 'JWT', scheme: 'bearer')]
+#[AcceptableMethods(['GET', 'POST', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'])]
+#[Controller(route: 'api/v4/schemas/[schema]', scope: Scope::SUB_USER_ALLOWED)]
+class Schema extends AbstractApi
+{
+
+    private Database $schemaObj;
+
+    /**
+     * @throws Exception
+     */
+    public function __construct(public readonly Route2 $route, Connection $connection)
+    {
+        parent::__construct($connection);
+        $this->resource = 'schemas';
+    }
+
+    /**
+     * @return Response
+     * @throws PhpfastcacheInvalidArgumentException
+     * @throws GC2Exception
+     */
+    #[OA\Get(path: '/api/v4/schemas/{schema}', operationId: 'getSchema', description: "Get schema(s).", tags: ['Schema'])]
+    #[OA\Parameter(name: 'schema', description: 'Schema name', in: 'path', required: false, schema: new OA\Schema(type: 'string'), example: 'my_schema')]
+    #[OA\Parameter(name: 'namesOnly', description: 'Return only schema names and _table_count (omit tables and sequences). Much faster: the full listing loads the definition of every table.', in: 'query', required: false, schema: new OA\Schema(type: 'boolean'), example: true)]
+    #[OA\Response(response: 200, description: 'Ok', content: new OA\JsonContent(oneOf: [new OA\Schema(ref: "#/components/schemas/Schema"),
+        new OA\Schema(type: "array", items: new OA\Items(ref: "#/components/schemas/Schema"))]),
+        links: [
+            new OA\Link(
+                link: "getTableLink",
+                operationId: "getTable",
+                parameters: [
+                    "schema" => '$request.path.schema'
+                ],
+                description: "Link to tables in schema."
+            )
+        ])
+    ]
+    #[OA\Response(response: 400, description: 'Bad request')]
+    #[OA\Response(response: 404, description: 'Not found')]
+    #[AcceptableAccepts(['application/json', '*/*'])]
+    #[Override]
+    public function get_index(): Response
+    {
+        $schemas = $this->schemaObj->listAllSchemas()["data"];
+        $tableCounts = array_column($schemas, 'table_count', 'schema');
+        $response = [];
+
+        if ($this->route->jwt['data']['superUser'] && empty($this->schema)) {
+            foreach ($schemas as $schema) {
+                $name = $schema["schema"];
+                $links = [
+                    'tables' => '/api/v4/schemas/' . $name . '/tables',
+                    'sequences' => '/api/v4/schemas/' . $name . '/sequences',
+                ];
+                $t = [
+                    'name' => $name,
+                    '_table_count' => $tableCounts[$name] ?? 0,
+                ];
+                if (!in_array(Input::get('namesOnly'), ['', 'true', '1', 't'], true)) {
+                    $t['tables'] = Table::getTables($name, $this);
+                    $t['sequences'] = Sequence::getSequences($this->table[0], $name);
+                }
+                $t['_links'] = $links;
+                $response[] = $t;
+            }
+            return $this->getResponse(data: $response);
+        } else {
+            $r = [];
+            foreach ($this->schema as $schema) {
+                $links = [
+                    'tables' => '/api/v4/schemas/' . $schema . '/tables',
+                    'sequences' => '/api/v4/schemas/' . $schema . '/sequences',
+                ];
+                $t = [
+                    'name' => $schema,
+                    '_table_count' => $tableCounts[$schema] ?? 0,
+                ];
+                if (!in_array(Input::get('namesOnly'), ['', 'true', '1', 't'], true)) {
+                    $t['tables'] = Table::getTables($schema, $this);
+                    $t['sequences'] = Sequence::getSequences($this->table[0], $schema);
+                }
+                $t['_links'] = $links;
+                $r[] = $t;
+            }
+            return $this->getResponse($r, single: count($r) == 1);
+        }
+    }
+
+    /**
+     * @return Response
+     * @throws GC2Exception
+     * @throws InvalidArgumentException
+     */
+    #[OA\Post(path: '/api/v4/schemas', operationId: 'postSchema', description: "Create schema(s).", tags: ['Schema'])]
+    #[OA\RequestBody(description: 'Schema to create.', required: true, content: new OA\JsonContent(oneOf: [new OA\Schema(ref: "#/components/schemas/Schema"),
+        new OA\Schema(type: "array", items: new OA\Items(ref: "#/components/schemas/Schema"))])
+    )]
+    #[OA\Response(response: 201, description: 'Created')]
+    #[OA\Response(response: 400, description: 'Bad request')]
+    #[AcceptableContentTypes(['application/json'])]
+    #[AcceptableAccepts(['application/json', '*/*'])]
+    #[Override]
+    public function post_index(): Response
+    {
+        if (!$this->route->jwt['data']['superUser']) {
+            throw new GC2Exception("Only superusers can create schemas", 403);
+        }
+
+        $body = Input::getBody();
+        $data = json_decode($body);
+        $this->table[0] = new TableModel(null, connection: $this->connection);
+        $list = [];
+
+        $this->table[0]->withTransaction(function () use (&$list, $data) {
+            if (is_array($data)) {
+                foreach ($data as $datum) {
+                    $this->table[0]->postgisschema = $datum->name;
+                    $r = $this->schemaObj->createSchema($datum->name, $this->table[0]);
+                    $list[] = $r['schema'];
+                    // Add tables
+                    if (!empty($datum->tables)) {
+                        foreach ($datum->tables as $table) {
+                            Table::addTable($this->table[0], $table, $this);
+                        }
+                    }
+                }
+            } else {
+                $this->table[0]->postgisschema = $data->name;
+                $r = $this->schemaObj->createSchema($data->name, $this->table[0]);
+                $list[] = $r['schema'];
+
+                // Add sequences and defer "OWNED BY" to after creation of tables
+                if (!empty($data->sequences)) {
+                    foreach ($data->sequences as $sequence) {
+                        Sequence::addSequence($this->table[0], $data->name, (array)$sequence, false);
+                    }
+                }
+                // Add tables
+                if (!empty($data->tables)) {
+                    foreach ($data->tables as $table) {
+                        Table::addTable($this->table[0], $table, $this);
+                    }
+                }
+                // Alter sequences so "OWNED BY" is set after creation of tables
+                if (!empty($data->sequences)) {
+                    foreach ($data->sequences as $sequence) {
+                        Sequence::alterSequence($this->table[0], $data->name, (array)$sequence, false);
+                    }
+                }
+            }
+        });
+        $baseUri = "/api/v4/schemas/";
+        return $this->postResponse($baseUri, $list);
+    }
+
+    /**
+     * @return Response
+     * @throws GC2Exception
+     */
+    #[OA\Patch(path: '/api/v4/schemas/{schema}', operationId: 'patchSchema', description: "Rename an existing schema.", tags: ['Schema'])]
+    #[OA\Parameter(name: 'schema', description: 'Schema name', in: 'path', required: false, schema: new OA\Schema(type: 'string'), example: 'my_schema')]
+    #[OA\RequestBody(description: 'Rename schema', required: true, content: new OA\JsonContent(
+        allOf: [
+            new OA\Schema(
+                required: ["name"],
+                properties: [
+                    new OA\Property(property: "name", description: "New schema name.", type: "string", example: "my_schema_with_new_name")
+                ]
+            )
+        ]
+    ))]
+    #[OA\Response(response: 303, description: 'Renamed')]
+    #[OA\Response(response: 400, description: 'Bad request')]
+    #[OA\Response(response: 404, description: 'Not found')]
+    #[AcceptableContentTypes(['application/json'])]
+    #[AcceptableAccepts(['application/json', '*/*'])]
+    #[Override]
+    public function patch_index(): Response
+    {
+        if (!$this->route->jwt['data']['superUser']) {
+            throw new GC2Exception("", 403);
+        }
+        $body = Input::getBody();
+        $data = json_decode($body);
+        $r = $this->schemaObj->renameSchema($this->schema[0], $data->name);
+        return $this->patchResponse('/api/v4/schemas/', [$r['data']['name']]);
+    }
+
+    /**
+     * @return Response
+     * @throws GC2Exception
+     */
+    #[OA\Delete(path: '/api/v4/schemas/{schema}', operationId: 'deleteSchema', description: "Delete schema(s).", tags: ['Schema'])]
+    #[OA\Parameter(name: 'schema', description: 'Schema name', in: 'path', required: true, schema: new OA\Schema(type: 'string'), example: 'my_schema')]
+    #[OA\Response(response: 204, description: 'Schema deleted')]
+    #[OA\Response(response: 400, description: 'Bad request')]
+    #[OA\Response(response: 404, description: 'Not found')]
+    #[Override]
+    public function delete_index(): Response
+    {
+        if (!$this->route->jwt['data']['superUser']) {
+            throw new GC2Exception("Only super users can delete schemas", 403);
+        }
+        $this->schemaObj->connect();
+        $this->schemaObj->withTransaction(function () {
+            foreach ($this->schema as $schema) {
+                $this->schemaObj->deleteSchema($schema, false);
+            }
+        });
+        return $this->deleteResponse();
+    }
+
+    /**
+     * @throws GC2Exception|PhpfastcacheInvalidArgumentException
+     */
+    public function validate(): void
+    {
+        $schema = $this->route->getParam("schema");
+        $body = Input::getBody();
+
+        // Patch and delete on schema collection is not allowed
+        if (empty($schema) && in_array(Input::getMethod(), ['patch', 'delete'])) {
+            throw new GC2Exception("Patch and delete on schema collection is not allowed", 400);
+        }
+        if (!empty($schema) && count(explode(',', $schema)) > 1 && Input::getMethod() == 'patch') {
+            throw new GC2Exception("Patch with multiple schemas is not allowed", 400);
+        }
+        // Throw exception if tried with schema resource
+        if (Input::getMethod() == 'post' && $schema) {
+            $this->postWithResource();
+        }
+        $collection = self::getAssert();
+        $this->validateRequest($collection, $body, Input::getMethod());
+
+        $this->initiate(schema: $schema);
+        $this->schemaObj = new Database(connection: $this->connection);
+    }
+
+    static public function getAssert(): Assert\Collection
+    {
+        return new Assert\Collection([
+            'name' => new Assert\Optional([
+                new Assert\Type('string'),
+                new Assert\NotBlank(),
+            ]),
+            'tables' => new Assert\Optional([
+                new Assert\Type('array'),
+                new Assert\Count(min: 1),
+                new Assert\All([
+                    new Assert\NotBlank(),
+                    Table::getAssert(),
+                ]),
+            ]),
+            'sequences' => new Assert\Optional([
+                new Assert\Type('array'),
+                new Assert\Count(min: 1),
+                new Assert\All([
+                    new Assert\NotBlank(),
+                    Sequence::getAssert(),
+                ]),
+            ]),
+        ]);
+    }
+
+    public function put_index(): Response
+    {
+        // TODO: Implement put_index() method.
+    }
+}

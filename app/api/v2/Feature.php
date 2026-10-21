@@ -1,66 +1,79 @@
 <?php
 /**
- * Long description for file
- *
- * Long description for file (if any)...
- *
- * @category   API
- * @package    app\api\v1
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2026 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
- * @since      File available since Release 2013.1
  *
  */
 
 namespace app\api\v2;
 
-use \app\inc\Input;
-use \app\inc\Route;
-use \app\inc\Response;
-use \app\models\Database;
-use \app\models\Layer;
-use \GuzzleHttp\Client;
+use app\inc\Controller;
+use app\inc\Input;
+use app\inc\Route;
+use app\inc\Response;
+use app\inc\Session;
+use app\inc\Util;
+use app\inc\geometry\GeometryFactory;
+use app\inc\geometry\GmlConverter;
+use app\models\Database;
+use app\models\Layer;
+use Error;
+use Exception;
+use geoPHP;
+use GuzzleHttp\Client;
+use GuzzleHttp\Cookie\CookieJar;
+use GuzzleHttp\Exception\GuzzleException;
+use PDOException;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
+use XML_Unserializer;
 
 include_once(__DIR__ . "../../../vendor/phayes/geophp/geoPHP.inc");
-include_once(__DIR__ . "../../../libs/phpgeometry_class_namespace.php");
-include_once(__DIR__ . "../../../libs/gmlparser.php");
 include_once(__DIR__ . "../../../libs/PEAR/XML/Unserializer.php");
 include_once(__DIR__ . "../../../libs/PEAR/XML/Serializer.php");
+
 
 /**
  * Class Feature
  * @package app\api\v2
  */
-class Feature extends \app\inc\Controller
+class Feature extends Controller
 {
-    private $transactionHeader;
-    private $geometryfactory;
-    private $sourceSrid;
-    private $wfsUrl;
-    private $db;
-    private $schema;
-    private $table;
-    private $geom;
-    private $field;
-    private $key;
+    private string $transactionHeader;
+    private GeometryFactory $geometryfactory;
+    private ?string $sourceSrid;
+    private string $wfsUrl;
+    private string $db;
+    private string $schema;
+    private string $table;
+    private string $geom;
+    private mixed $field;
+    private ?string $key;
+    private ?string $user;
+    private Client $client;
 
     /**
      * Feature constructor.
+     * @throws PhpfastcacheInvalidArgumentException
      */
     function __construct()
     {
 
         parent::__construct();
 
+        $this->client = new Client([
+            'timeout' => 100.0,
+        ]);
+
         // Set properties
-        $this->wfsUrl = "http://127.0.0.1/wfs/%s/%s/%s";
+        $this->wfsUrl = "http://localhost/wfs/%s/%s/%s";
         $this->sourceSrid = Route::getParam("srid");
         $this->db = Database::getDb();
         $this->schema = explode(".", Route::getParam("layer"))[0];
         $this->table = explode(".", Route::getParam("layer"))[1];
         $this->geom = explode(".", Route::getParam("layer"))[2];
         $this->key = Route::getParam("key");
+        $this->user = Route::getParam("user");
 
         if ((!$this->schema) || (!$this->table) || (!$this->geom)) {
             $response['success'] = false;
@@ -70,68 +83,40 @@ class Feature extends \app\inc\Controller
             die(Response::toJson($response));
         }
 
-        // Check privileges of user on layer
-        try {
-            $response = $this->ApiKeyAuthLayer($this->schema . "." . $this->table, $this->sUser, true, Input::getApiKey(), [Route::getParam("layer")]);
-        } catch (\PDOException $e) {
-            header("HTTP/1.1 401 Unauthorized");
-            die($e->getMessage());
-        }
-
-        if (!$response["success"]) {
-            header("HTTP/1.1 401 Unauthorized");
-            die(Response::toJson($response));
-        }
-
         $layer = new Layer();
-        $this->field = $layer->getAll(Route::getParam("layer"), true)["data"][0]["pkey"];
+        $this->field = $layer->getAll($this->db, true, Route::getParam("layer"), false, false, false)["data"][0]["pkey"];
 
         // Init geometryfactory
-        $this->geometryfactory = new \mapcentia\geometryfactory();
+        $this->geometryfactory = new GeometryFactory();
 
         // Set transaction xml header
-        $this->transactionHeader = "<wfs:Transaction xmlns:wfs=\"http://www.opengis.net/wfs\" service=\"WFS\" version=\"1.0.0\"
+        $this->transactionHeader = "<wfs:Transaction xmlns:wfs=\"http://www.opengis.net/wfs\" service=\"WFS\" version=\"1.1.0\"
                  xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"
-                 xsi:schemaLocation=\"http://www.opengis.net/wfs http://schemas.opengis.net/wfs/1.0.0/WFS-transaction.xsd\">\n";
+                 xsi:schemaLocation=\"http://www.opengis.net/wfs http://schemas.opengis.net/wfs/1.1.0/WFS-transaction.xsd\">\n";
     }
 
-    private function decodeCode($code){
-        return preg_replace_callback(
-            "@\\\(x)?([0-9a-f]{2,3})@",
-            function($m){
-                return chr($m[1]?hexdec($m[2]):octdec($m[2]));
-            },
-            $code
-        );
-    }
-
-    public function get_index()
+    public function get_index(): array
     {
         $response = [];
 
-        $unserializer = new \XML_Unserializer(array(
+        $unserializer = new XML_Unserializer(array(
             'parseAttributes' => false,
             'typeHints' => false
         ));
 
-        $url = sprintf($this->wfsUrl, $this->db, $this->schema, $this->sourceSrid);
-
-        // Init the Guzzle client
-        $client = new Client([
-            'timeout' => 10.0,
-        ]);
+        $url = sprintf($this->wfsUrl, $this->user, $this->schema, $this->sourceSrid);
 
         // GET the transaction
         try {
-            $res = $client->get($url . "?request=GetFeature&typeName={$this->table}&FEATUREID={$this->table}.{$this->key}");
-        } catch (\Exception $e) {
+            $res = $this->client->get($url . "?service=WFS&version=1.1.0&request=GetFeature&typeName={$this->table}&FEATUREID={$this->table}.{$this->key}");
+        } catch (GuzzleException $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
             $response['code'] = 500;
             return $response;
         }
 
-        $xml = $res->getBody();
+        $xml = (string)$res->getBody();
 
         // Unserialize the transaction response
         $status = $unserializer->unserialize($xml);
@@ -148,7 +133,7 @@ class Feature extends \app\inc\Controller
         $arr = $unserializer->getUnserializedData();
 
         // Check if WFS returned a service exception
-        if (isset($arr["ServiceException"])) {
+        if (isset($arr["ows:Exception"])) {
             $response['success'] = false;
             $response['message'] = $arr;
             $response['code'] = "500";
@@ -156,49 +141,53 @@ class Feature extends \app\inc\Controller
         }
 
         // Convert GML to WKT
-        $gmlConverter = new \mapcentia\gmlConverter();
+        $gmlConverter = new GmlConverter();
         $wkt = $gmlConverter->gmlToWKT($xml)[0][0];
 
         // Convert WKT to GeoJSON
-        try {
-            $json  = \geoPHP::load($wkt, 'wkt')->out('json');
-        } catch (\Exception $e) {
-            $response['success'] = false;
-            $response['message'] = "Could not create GeoJSON";
-            $response['code'] = "500";
-        }
-
-        foreach ($arr["gml:featureMember"][$this->db . ":" . $this->table] as $key => $prop) {
-            if (!is_array($prop)){
-                $props[ explode(":", $key)[1]] = $prop;
+        if ($wkt) {
+            try {
+                $json = geoPHP::load($wkt, 'wkt')->out('json');
+            } catch (Exception $e) {
+                $response['success'] = false;
+                $response['message'] = $e->getMessage();
+                $response['code'] = "500";
+                return $response;
+            } catch (Error $e) {
+                $response['success'] = false;
+                $response['message'] = $e->getMessage();
+                $response['code'] = "500";
+                return $response;
             }
         }
 
-        $jArr = [
-            "type"=>"FeatureCollection",
+        foreach ($arr["gml:featureMembers"][$this->schema . ":" . $this->table] as $key => $prop) {
+            if (!is_array($prop)) {
+                $props[explode(":", $key)[1]] = $prop;
+            }
+        }
+
+        return [
+            "type" => "FeatureCollection",
             "features" => [[
                 "type" => "Feature",
                 "properties" => $props,
                 "geometry" => json_decode($json)
             ]]
         ];
-
-        return $jArr;
     }
 
     /**
      * @return array
+     * @throws GuzzleException
+     * @throws PhpfastcacheInvalidArgumentException
+     * @throws \JsonException
      */
     public function post_index(): array
     {
 
         // Decode GeoJSON
-        if (!$features = json_decode($this->decodeCode(Input::getBody()), true)["features"]) {
-            $response['success'] = false;
-            $response['message'] = "Could not decode GeoJSON";
-            $response['code'] = 500;
-            return $response;
-        }
+        $features = json_decode(Input::getBody(false), true, 512, JSON_THROW_ON_ERROR)["features"];
 
         // Start build the WFS transaction
         $xml = $this->transactionHeader;
@@ -209,47 +198,60 @@ class Feature extends \app\inc\Controller
             // Get properties
             $props = $feature["properties"];
 
+            $gmlId = !empty($props[$this->field]) ? "gml:id=\"{$props[$this->field]}\"" : "";
+
             // Create the Insert section
             $xml .= "<wfs:Insert>\n";
-            $xml .= "<feature:{$this->table} xmlns:feature=\"http://mapcentia.com/{$this->db}\">\n";
+            $xml .= "<feature:{$this->table} {$gmlId} xmlns:feature=\"http://mapcentia.com/{$this->db}/{$this->schema}\">\n";
 
             try {
                 // Get GML from WKT geom and catch error if geom is missing
-                $wkt = \geoPHP::load(json_encode($feature), 'json')->out('wkt');
+                $wkt = geoPHP::load(json_encode($feature), 'json')->out('wkt');
                 $xml .= "<feature:{$this->geom}>\n";
-                $xml .= $this->geometryfactory->createGeometry($wkt, "EPSG:" . $this->sourceSrid)->getGML();
+                $xml .= $this->geometryfactory->createGeometry($wkt, "EPSG:" . $this->sourceSrid)->toGML();
                 $xml .= "</feature:{$this->geom}>\n";
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 // Pass. Geom is not required
             }
 
-            // Create the properties
-            foreach ($props as $elem => $prop) {
-                $xml .= "<feature:{$elem}>{$prop}</feature:{$elem}>\n";
+            // Create the elements
+            foreach ($props as $elem => $value) {
+                if (isset($this->field) && $this->field != $elem) {
+                    if (is_string($value)) {
+                        $value = "<![CDATA[" . $value . "]]>";
+                    } elseif (is_array($value)) {
+                        // Create PG array
+                        $value = json_encode($value);
+                        $value = '{' . substr($value, 1, -1) . '}';
+                    }
+                    if ($value === false) {
+                        $value = 'f';
+                    }
+                    if ($value === true) {
+                        $value = 't';
+                    }
+                    $xml .= "<feature:{$elem}>{$value}</feature:{$elem}>\n";
+                }
             }
 
             $xml .= "</feature:{$this->table}>\n";
             $xml .= "</wfs:Insert>\n";
-
         }
         $xml .= "</wfs:Transaction>\n";
-
         return $this->commit($xml);
     }
 
     /**
      * @return array
+     * @throws GuzzleException
+     * @throws \JsonException
+     * @throws PhpfastcacheInvalidArgumentException
      */
     public function put_index(): array
     {
 
         // Decode GeoJSON
-        if (!$features = json_decode($this->decodeCode(Input::getBody()), true)["features"]) {
-            $response['success'] = false;
-            $response['message'] = "Could not decode GeoJSON";
-            $response['code'] = 500;
-            return $response;
-        }
+        $features = json_decode(Input::getBody(false), true, 512, JSON_THROW_ON_ERROR)["features"];
 
         // Start build the WFS transaction
         $xml = $this->transactionHeader;
@@ -261,7 +263,7 @@ class Feature extends \app\inc\Controller
             $props = $feature["properties"];
 
             // Check if property with primary key is missing
-            if (!isset($props[$this->field])){
+            if (!isset($props[$this->field])) {
                 $response['success'] = false;
                 $response['message'] = "Property with primary key is missing from at least one GeoJSON feature";
                 $response['code'] = 500;
@@ -269,26 +271,39 @@ class Feature extends \app\inc\Controller
             }
 
             // Create the Insert section
-            $xml .= "<wfs:Update typeName=\"{$this->db}:{$this->table}\">\n";
+            $xml .= "<wfs:Update typeName=\"{$this->schema}:{$this->table}\">\n";
 
             // Get GML from WKT geom and catch error if geom is missing
             try {
-                $wkt = \geoPHP::load(json_encode($feature), 'json')->out('wkt');
+                $wkt = geoPHP::load(json_encode($feature), 'json')->out('wkt');
                 $xml .= "<wfs:Property>\n";
                 $xml .= "<wfs:Name>{$this->geom}</wfs:Name>\n";
                 $xml .= "<wfs:Value>\n";
-                $xml .= $this->geometryfactory->createGeometry($wkt, "EPSG:" . $this->sourceSrid)->getGML();
+                $xml .= $this->geometryfactory->createGeometry($wkt, "EPSG:" . $this->sourceSrid)->toGML();
                 $xml .= "</wfs:Value>\n";
                 $xml .= "</wfs:Property>\n";
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 // Pass. Geom is not required
             }
 
-            // Create the properties
-            foreach ($props as $elem => $prop) {
+            // Create the elements
+            foreach ($props as $elem => $value) {
+                if (is_string($value)) {
+                    $value = "<![CDATA[" . $value . "]]>";
+                } elseif (is_array($value)) {
+                    // Create PG array
+                    $value = json_encode($value);
+                    $value = '{' . substr($value, 1, -1) . '}';
+                }
+                if ($value === false) {
+                    $value = 'f';
+                }
+                if ($value === true) {
+                    $value = 't';
+                }
                 $xml .= "<wfs:Property>\n";
-                $xml .= "<wfs:Name>{$elem}</wfs:Name>\n";
-                $xml .= "<wfs:Value>{$prop}</wfs:Value>\n";
+                $xml .= "<wfs:Name>$elem</wfs:Name>\n";
+                $xml .= "<wfs:Value>$value</wfs:Value>\n";
                 $xml .= "</wfs:Property>\n";
             }
 
@@ -308,18 +323,18 @@ class Feature extends \app\inc\Controller
 
     /**
      * @return array
+     * @throws GuzzleException
      */
     public function delete_index(): array
     {
-
         // Start build the WFS transaction
         $xml = $this->transactionHeader;
 
-        $xml.="<wfs:Delete typeName=\"{$this->db}:{$this->table}\" xmlns:{$this->db}=\"http://mapcentia.com/{$this->db}\">";
-        $xml.="<ogc:Filter xmlns:ogc=\"http://www.opengis.net/ogc\">";
-        $xml.="<ogc:FeatureId fid=\"{$this->table}.{$this->key}\"/>";
-        $xml.="</ogc:Filter>";
-        $xml.="</wfs:Delete>";
+        $xml .= "<wfs:Delete typeName=\"{$this->schema}:{$this->table}\" xmlns:{$this->schema}=\"http://mapcentia.com/{$this->db}/{$this->schema}\">";
+        $xml .= "<ogc:Filter xmlns:ogc=\"http://www.opengis.net/ogc\">";
+        $xml .= "<ogc:FeatureId fid=\"{$this->table}.{$this->key}\"/>";
+        $xml .= "</ogc:Filter>";
+        $xml .= "</wfs:Delete>";
 
         $xml .= "</wfs:Transaction>\n";
 
@@ -327,37 +342,61 @@ class Feature extends \app\inc\Controller
     }
 
     /**
-     * @param $xml
+     * @param string $xml
      * @return array
+     * @throws GuzzleException
+     * @throws PhpfastcacheInvalidArgumentException
      */
-    private function commit(string $xml) : array
+    private function commit(string $xml): array
     {
-        //echo $xml;
+        [$user, $db] = Util::extractUserFromSubUserString($this->user);
+        // Check privileges of user on layer
+        $rel = $this->schema . "." . $this->table;
+        try {
+            $response = $this->ApiKeyAuthLayer($rel, true, [$rel], $user, Input::getApiKey());
+        } catch (PDOException $e) {
+            header("HTTP/1.1 401 Unauthorized");
+            die($e->getMessage());
+        }
+
+        if (!$response["success"]) {
+            header("HTTP/1.1 401 Unauthorized");
+            die(Response::toJson($response));
+        }
         $response = [];
 
-        $unserializer = new \XML_Unserializer(array(
-            'parseAttributes' => TRUE,
-            'typeHints' => FALSE
+        $unserializer = new XML_Unserializer(array(
+            'parseAttributes' => true,
+            'typeHints' => false,
         ));
 
-        $url = sprintf($this->wfsUrl, $this->db, $this->schema, $this->sourceSrid);
+        $url = sprintf($this->wfsUrl, $this->user, $this->schema, $this->sourceSrid);
 
-        // Init the Guzzle client
-        $client = new Client([
-            'timeout' => 10.0,
-        ]);
-
+        if (empty(Input::getCookies()["PHPSESSID"])) {
+            Session::start();
+            Session::set("auth", true);
+            Session::set("screen_name", $user ?? $db);
+            Session::set("parentdb", $db);
+            Session::set("subuser", !empty($user));
+            Session::write();
+            $id = Session::getId();
+        } else {
+            $id = Input::getCookies()["PHPSESSID"];
+        }
         // POST the transaction
         try {
-            $res = $client->post($url, ['body' => $xml]);
-        } catch (\Exception $e) {
+            $res = $this->client->post($url, ['body' => $xml, 'cookies' => CookieJar::fromArray([
+                "PHPSESSID" => $id,
+                "XDEBUG_SESSION" => "XDEBUG_ECLIPSE"
+            ], 'localhost')]);
+        } catch (Exception $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
             $response['code'] = 500;
             return $response;
         }
 
-        $transactionResponse = $res->getBody();
+        $transactionResponse = (string)$res->getBody();
 
         // Unserialize the transaction response
         $status = $unserializer->unserialize($transactionResponse);
@@ -366,6 +405,7 @@ class Feature extends \app\inc\Controller
         if (gettype($status) != "boolean" && $status !== true) {
             $response['success'] = false;
             $response['message'] = "Could not unserialize transaction response";
+            $response['body'] = $transactionResponse;
             $response['code'] = 500;
             return $response;
         }
@@ -373,7 +413,7 @@ class Feature extends \app\inc\Controller
         $arr = $unserializer->getUnserializedData();
 
         // Check if WFS returned a service exception
-        if (isset($arr["ServiceException"])) {
+        if (isset($arr["ows:Exception"])) {
             $response['success'] = false;
             $response['message'] = $arr;
             $response['code'] = "500";
@@ -383,6 +423,5 @@ class Feature extends \app\inc\Controller
         $response['success'] = true;
         $response['message'] = $arr;
         return $response;
-
     }
 }

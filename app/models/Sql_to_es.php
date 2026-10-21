@@ -8,8 +8,13 @@
 
 namespace app\models;
 
+use app\conf\App;
 use app\inc\Model;
+use Exception;
 use GuzzleHttp\Client;
+use GuzzleHttp\Exception\GuzzleException;
+use PDOException;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
 
 /**
  * Class Sql_to_es
@@ -26,7 +31,7 @@ class Sql_to_es extends Model
      * Sql_to_es constructor.
      * @param string $srs
      */
-    function __construct($srs = "900913")
+    function __construct($srs = "3857")
     {
         parent::__construct();
         $this->srs = $srs;
@@ -48,7 +53,7 @@ class Sql_to_es extends Model
             if ($item[$key]["status"] != "201") {
                 $res[] = array(
                     "id" => $item[$key]["_id"],
-                    "error" => $item[$key]["error"],
+                    "error" => isset($item[$key]["error"]) ? $item[$key]["error"] : null,
                 );
             }
         }
@@ -56,25 +61,34 @@ class Sql_to_es extends Model
     }
 
     /**
-     * @param string $q
-     * @param string $index
-     * @param string $type
-     * @param string $id
-     * @param string $db
+     * @param $q
+     * @param $schema
+     * @param $rel
+     * @param $priKey
+     * @param $db
      * @return array
+     * @throws PhpfastcacheInvalidArgumentException|GuzzleException
      */
-    public function runSql($q, $index, $type, $id, $db)
+    public function runSql($q, $schema, $rel, $priKey, $db)
     {
         $response = [];
         $i = 0;
 
-        $esUrl = \app\conf\App::$param['esHost'] . ":9200/_bulk";
+        $esUrl = App::$param['esHost'] ?: "http://127.0.0.1";
+        $split = explode(":", $esUrl);
+        if (!empty($split[2])) {
+            $port = $split[2];
+        } else {
+            $port = "9200";
+        }
+        $esUrl = $split[0] . ":" . $split[1] . ":" . $port . "/_bulk";
+
         $client = new Client([
-            'timeout' => 10.0,
             'headers' => [
                 'Content-Type' => 'application/json'
             ]
         ]);
+
         $bulKCount = 0;
         $bulkSize = 500;
         $geometries = [];
@@ -83,15 +97,15 @@ class Sql_to_es extends Model
         // We create a unique index name
         $errors = false;
         $errors_in = [];
-        $index = $db . "_" . $index . "_" . $type;
+        $index = $db . "_" . $schema . "_" . $rel;
         $name = "_" . rand(1, 999999999) . microtime();
-        $view = $this->toAscii($name, null, "_");
+        $view = self::toAscii($name, null, "_");
         $sqlView = "CREATE TEMPORARY VIEW {$view} as {$q}";
         $res = $this->prepare($sqlView);
 
         try {
             $res->execute();
-        } catch (\PDOException $e) {
+        } catch (PDOException $e) {
             $this->rollback();
             $response['success'] = false;
             $response['message'] = $e->getMessage();
@@ -99,13 +113,13 @@ class Sql_to_es extends Model
             return $response;
         }
 
-        $arrayWithFields = $this->getMetaData($view, true); // Temp VIEW
+        $arrayWithFields = $this->getMetaData($view, true, false, null, null, false, false); // Temp VIEW
         $postgisVersion = $this->postgisVersion();
         $bits = explode(".", $postgisVersion["version"]);
-        if ((int)$bits[1] > 0) {
-            $ST_Force2D = "ST_Force2D";
+        if ((int)$bits[0] < 3 && (int)$bits[1] === 0) {
+            $ST_Force2D = "ST_Force_2D";  // In case of PostGIS 2.0.x
         } else {
-            $ST_Force2D = "ST_Force_2D";
+            $ST_Force2D = "ST_Force2D";
         }
         $fieldsArr = [];
         foreach ($arrayWithFields as $key => $arr) {
@@ -127,7 +141,7 @@ class Sql_to_es extends Model
 
             $innerStatement = $this->prepare("FETCH 1 FROM curs");
 
-        } catch (\PDOException $e) {
+        } catch (PDOException $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
             $response['code'] = 400;
@@ -137,12 +151,14 @@ class Sql_to_es extends Model
         try {
 
             while ($innerStatement->execute() && $row = $this->fetchRow($innerStatement, "assoc")) {
-
                 $arr = [];
+                $geometries = [];
                 foreach ($row as $key => $value) {
                     if ($arrayWithFields[$key]['type'] == "geometry") {
-                        $geometries[] = json_decode($row[$key]);
-                    } elseif ($arrayWithFields[$key]['type'] == "json" || $arrayWithFields[$key]['type'] == "jsonb") {
+                        if (!empty($value)) {
+                            $geometries[] = json_decode($value);
+                        }
+                    } elseif (!empty($value) & ($arrayWithFields[$key]['type'] == "json" || $arrayWithFields[$key]['type'] == "jsonb")) {
                         $arr = $this->array_push_assoc($arr, $key, json_decode($value));
                     } else {
                         $arr = $this->array_push_assoc($arr, $key, $value);
@@ -160,13 +176,11 @@ class Sql_to_es extends Model
 
                 unset($geometries);
 
-                $json .= json_encode(array("index" => array("_index" => $index, "_type" => $type, "_id" => $arr[$id])));
+                $json .= json_encode(array("index" => array("_index" => $index, "_id" => $arr[$priKey])));
                 $json .= "\n";
                 $json .= json_encode($features);
                 $json .= "\n";
-
                 if (is_int($i / $bulkSize)) {
-
                     $esResponse = $client->post($esUrl, ['body' => $json]);
                     $obj = json_decode($esResponse->getBody(), true);
 
@@ -176,16 +190,15 @@ class Sql_to_es extends Model
                     }
                     $json = "";
                     $bulKCount++;
-                    error_log($i);
-                    error_log(number_format(memory_get_usage()));
-
                 }
 
                 $i++;
             }
 
             // Index the last bulk
-            $esResponse = $client->post($esUrl, ['body' => $json]);
+            if ($json) {
+                $esResponse = $client->post($esUrl, ['body' => $json]);
+            }
             $obj = json_decode($esResponse->getBody(), true);
             if (isset($obj["errors"]) && $obj["errors"] == true) {
                 $errors = true;
@@ -195,7 +208,7 @@ class Sql_to_es extends Model
             $this->execQuery("CLOSE curs");
             $this->commit();
 
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
             $response['code'] = 410;

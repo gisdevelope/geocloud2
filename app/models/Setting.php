@@ -1,152 +1,291 @@
 <?php
 /**
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2021 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
- *  
+ *
  */
 
 namespace app\models;
 
+use app\conf\App;
+use app\conf\Connection;
+use app\inc\Cache;
+use app\inc\Globals;
 use app\inc\Model;
+use PDOException;
+use Phpfastcache\Exceptions\PhpfastcacheLogicException;
+use Psr\Cache\InvalidArgumentException;
+use stdClass;
 
+
+/**
+ * Class Setting
+ * @package app\models
+ */
 class Setting extends Model
 {
-    function __construct()
+    function __construct(?\app\inc\Connection $connection = null)
     {
-        parent::__construct();
+        parent::__construct(connection: $connection);
     }
 
     /**
-     * @return mixed
-     * @throws \PDOException;
+     *
+     * @throws InvalidArgumentException
      */
-    public function getArray()
+    private function clearCacheOnSchemaChanges(): void
     {
-        if (\app\conf\App::$param["encryptSettings"]) {
-            $secretKey = file_get_contents(\app\conf\App::$param["path"] . "app/conf/secret.key");
-            $sql = "SELECT pgp_pub_decrypt(settings.viewer.viewer::BYTEA, dearmor('{$secretKey}')) AS viewer FROM settings.viewer";
-        } else {
-            $sql = "SELECT viewer FROM settings.viewer";
-        }
-
-        try {
-            $res = $this->execQuery($sql);
-        } catch (\PDOException $e) {
-            throw new \PDOException($e->getMessage());
-        }
-
-        // Hack. Fall back to unencrypted if error. Preventing fail if changing from unencrypted to encrypted.
-        if ($this->PDOerror[0]) {
-            $this->PDOerror = null;
-            $sql = "SELECT viewer FROM settings.viewer";
-            $res = $this->execQuery($sql);
-        }
-
-        $arr = $this->fetchRow($res, "assoc");
-        return json_decode($arr['viewer']);
+        $patterns = [
+            $this->postgisdb . '_settings_*',
+        ];
+        Cache::deleteByPatterns($patterns);
     }
 
-    public function updateApiKey()
+    /**
+     * @return stdClass
+     * @throws PDOException
+     */
+    public function getArray(): stdClass
+    {
+        $cacheType = "settings";
+        $cacheId = $this->postgisdb . "_" . $cacheType . "_viewer";
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            return $CachedString->get();
+        } else {
+            if (App::$param["encryptSettings"]) {
+                $secretKey = file_get_contents(App::$param["path"] . "app/conf/secret.key");
+                $sql = "SELECT pgp_pub_decrypt(settings.viewer.viewer::BYTEA, dearmor('$secretKey')) AS viewer FROM settings.viewer";
+            } else {
+                $sql = "SELECT viewer FROM settings.viewer";
+            }
+            try {
+                $res = $this->execQuery($sql);
+            } catch (PDOException) {
+                // Hack. Fall back to unencrypted if error. Preventing fail if changing from unencrypted to encrypted.
+                $sql = "SELECT viewer FROM settings.viewer";
+                $res = $this->execQuery($sql);
+            }
+            $arr = $this->fetchRow($res);
+            $response = json_decode($arr['viewer']) ?? new stdClass();
+            $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);
+            Cache::save($CachedString);
+            return $response;
+        }
+    }
+
+    /**
+     * Per-database OpenSearch analysis block, stored under `search.analysis`
+     * in settings.viewer. Null when the database has no custom analysis.
+     */
+    public function getSearchAnalysis(): ?array
+    {
+        $arr = $this->getArray();
+        if (!isset($arr->search->analysis)) {
+            return null;
+        }
+        return json_decode(json_encode($arr->search->analysis), true);
+    }
+
+    /**
+     * @throws InvalidArgumentException
+     */
+    public function updateSearchAnalysis(array $analysis): void
+    {
+        $arr = $this->getArray();
+        if (!isset($arr->search)) {
+            $arr->search = new stdClass();
+        }
+        $arr->search->analysis = $analysis;
+        if (App::$param["encryptSettings"]) {
+            $pubKey = file_get_contents(App::$param["path"] . "app/conf/public.key");
+            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt(:viewer, dearmor('$pubKey'))";
+        } else {
+            $sql = "UPDATE settings.viewer SET viewer=:viewer";
+        }
+        $res = $this->prepare($sql);
+        $this->execute($res, [":viewer" => json_encode($arr)]);
+        $this->clearCacheOnSchemaChanges();
+    }
+
+    /**
+     * Updates the API key for a specified user and stores it in the database.
+     * Differentiates between superuser and subuser to appropriately assign the API key.
+     *
+     * @param string $userName The username of the user for whom the API key is being updated.
+     * @param bool $isSuperuser Indicates whether the user is a superuser or a subuser.
+     *
+     * @return string Returns the generated API key.
+     *
+     * @throws PDOException|InvalidArgumentException If an error occurs during the database update process.
+     */
+    public function updateApiKeyForUser(string $userName, bool $isSuperuser): string
     {
         $apiKey = md5(microtime() . rand());
         $arr = $this->getArray();
-        if (!$_SESSION["subuser"]) {
+        if ($isSuperuser) {
             $arr->api_key = $apiKey;
         } else {
-            $arr->api_key_subuser->{$_SESSION["subuser"]} = $apiKey;
+            if (!isset($arr->api_key_subuser)) {
+                $arr->api_key_subuser = new stdClass();
+            }
+            $arr->api_key_subuser->{$userName} = $apiKey;
         }
-        if (\app\conf\App::$param["encryptSettings"]) {
-            $pubKey = file_get_contents(\app\conf\App::$param["path"] . "app/conf/public.key");
-            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt('" . json_encode($arr) . "', dearmor('{$pubKey}'))";
+        if (App::$param["encryptSettings"]) {
+            $pubKey = file_get_contents(App::$param["path"] . "app/conf/public.key");
+            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt('" . json_encode($arr) . "', dearmor('$pubKey'))";
         } else {
             $sql = "UPDATE settings.viewer SET viewer='" . json_encode($arr) . "'";
         }
         $this->execQuery($sql, "PDO", "transaction");
-        if (!$this->PDOerror) {
-            $response['success'] = true;
-            $response['message'] = "API key updated";
-            $response['key'] = $apiKey;
-        } else {
-            $response['success'] = false;
-            $response['message'] = $this->PDOerror;
-            $response['code'] = 400;
-        }
-        return $response;
+        $this->clearCacheOnSchemaChanges();
+        return $apiKey;
     }
 
-    public function updatePw($pw)
+    /**
+     * Updates the API key for the current user session.
+     *
+     * @return array An associative array containing the status of the update, a success message, and the updated API key.
+     * @throws InvalidArgumentException
+     */
+    public function updateApiKey(): array
     {
-        $arr = $this->getArray();
-
-        if (!$_SESSION["subuser"]) {
-            $arr->pw = $this->encryptPw($pw);
-        } else {
-            $arr->pw_subuser->{$_SESSION["subuser"]} = $this->encryptPw($pw);
-        }
-        if (\app\conf\App::$param["encryptSettings"]) {
-            $pubKey = file_get_contents(\app\conf\App::$param["path"] . "app/conf/public.key");
-            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt('" . json_encode($arr) . "', dearmor('{$pubKey}'))";
-        } else {
-            $sql = "UPDATE settings.viewer SET viewer='" . json_encode($arr) . "'";
-        }
-        $this->execQuery($sql, "PDO", "transaction");
-        if (!$this->PDOerror) {
-            $response['success'] = true;
-            $response['message'] = "Password saved";
-        } else {
-            $response['success'] = false;
-            $response['message'] = $this->PDOerror;
-            $response['code'] = 400;
-        }
-        return $response;
-    }
-
-    public function updateExtent($extent)
-    {
-        $arr = $this->getArray();
-
-        $obj = (array)$arr->extents;
-        $obj[\app\conf\Connection::$param['postgisschema']] = $extent->extent;
-        $arr->extents = $obj;
-
-        $obj = (array)$arr->center;
-        $obj[\app\conf\Connection::$param['postgisschema']] = $extent->center;
-        $arr->center = $obj;
-
-        $obj = (array)$arr->zoom;
-        $obj[\app\conf\Connection::$param['postgisschema']] = $extent->zoom;
-        $arr->zoom = $obj;
-
-        if (\app\conf\App::$param["encryptSettings"]) {
-            $pubKey = file_get_contents(\app\conf\App::$param["path"] . "app/conf/public.key");
-            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt('" . json_encode($arr) . "', dearmor('{$pubKey}'))";
-        } else {
-            $sql = "UPDATE settings.viewer SET viewer='" . json_encode($arr) . "'";
-        }
-        $this->execQuery($sql, "PDO", "transaction");
-        if (!$this->PDOerror) {
-            $response['success'] = true;
-            $response['message'] = "Extent saved";
-        } else {
-            $response['success'] = false;
-            $response['message'] = $this->PDOerror;
-            $response['code'] = 400;
-        }
+        $response['success'] = true;
+        $response['message'] = "API key updated";
+        $response['key'] = $this->updateApiKeyForUser($_SESSION["screen_name"], !$_SESSION["subuser"]);
         return $response;
     }
 
     /**
-     * @param $extentrestrict
+     * @param string $pw
      * @return array
+     * @throws InvalidArgumentException
      */
-    public function updateExtentRestrict($extentrestrict) : array
+    public function updatePw(string $pw): array
+    {
+        $arr = $this->getArray();
+        if (!$_SESSION["subuser"]) {
+            $arr->pw = $this->encryptPw($pw);
+        } elseif (!empty($_SESSION["screen_name"])) {
+            if (!isset($arr->pw_subuser)) {
+                $arr->pw_subuser = new stdClass();
+            }
+            $arr->pw_subuser->{$_SESSION["screen_name"]} = $this->encryptPw($pw);
+        }
+        if (App::$param["encryptSettings"]) {
+            $pubKey = file_get_contents(App::$param["path"] . "app/conf/public.key");
+            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt('" . json_encode($arr) . "', dearmor('$pubKey'))";
+        } else {
+            $sql = "UPDATE settings.viewer SET viewer='" . json_encode($arr) . "'";
+        }
+        $this->execQuery($sql, "PDO", "transaction");
+        $response['success'] = true;
+        $response['message'] = "Password saved";
+        $this->clearCacheOnSchemaChanges();
+        return $response;
+    }
+
+    /**
+     * @param object $extent
+     * @return array
+     * @throws InvalidArgumentException
+     */
+    public function updateExtent(object $extent): array
+    {
+        $arr = $this->getArray();
+        $obj = (array)$arr->extents;
+        $obj[Connection::$param['postgisschema']] = $extent->extent;
+        $arr->extents = $obj;
+
+        $obj = (array)$arr->center;
+        $obj[Connection::$param['postgisschema']] = $extent->center;
+        $arr->center = $obj;
+
+        $obj = (array)$arr->zoom;
+        $obj[Connection::$param['postgisschema']] = $extent->zoom;
+        $arr->zoom = $obj;
+
+        if (App::$param["encryptSettings"]) {
+            $pubKey = file_get_contents(App::$param["path"] . "app/conf/public.key");
+            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt('" . json_encode($arr) . "', dearmor('$pubKey'))";
+        } else {
+            $sql = "UPDATE settings.viewer SET viewer='" . json_encode($arr) . "'";
+        }
+        $this->execQuery($sql, "PDO", "transaction");
+        $this->clearCacheOnSchemaChanges();
+        $response['success'] = true;
+        $response['message'] = "Extent saved";
+        return $response;
+    }
+
+    /**
+     * Reads the per-schema map view configuration (center, zoom, extent) from settings.viewer.
+     * Worker-safe: the schema is passed explicitly instead of being read from the process-global
+     * connection schema. Missing values are returned as null.
+     *
+     * @return array{center: array<float>|null, zoom: int|float|null, extent: array<float>|null}
+     * @throws InvalidArgumentException
+     */
+    public function getMapConfig(string $schema): array
+    {
+        $arr = $this->getArray();
+        return [
+            'center' => $arr->center->$schema ?? null,
+            'zoom' => $arr->zoom->$schema ?? null,
+            'extent' => $arr->extents->$schema ?? null,
+        ];
+    }
+
+    /**
+     * Updates the per-schema map view configuration (center, zoom, extent) in settings.viewer.
+     * Only the keys present in $data are touched, so a partial (PATCH) update leaves the others
+     * untouched. Worker-safe: the schema is passed explicitly instead of being read from the
+     * process-global connection schema, and the document is written back with a bound parameter.
+     *
+     * @param array{extent?: array<float>|null, center?: array<float>|null, zoom?: int|float|null} $data
+     * @throws InvalidArgumentException
+     */
+    public function updateMapConfig(string $schema, array $data): void
+    {
+        $arr = $this->getArray();
+        if (array_key_exists('extent', $data)) {
+            $obj = (array)($arr->extents ?? new stdClass());
+            $obj[$schema] = $data['extent'];
+            $arr->extents = (object)$obj;
+        }
+        if (array_key_exists('center', $data)) {
+            $obj = (array)($arr->center ?? new stdClass());
+            $obj[$schema] = $data['center'];
+            $arr->center = (object)$obj;
+        }
+        if (array_key_exists('zoom', $data)) {
+            $obj = (array)($arr->zoom ?? new stdClass());
+            $obj[$schema] = $data['zoom'];
+            $arr->zoom = (object)$obj;
+        }
+        if (App::$param["encryptSettings"]) {
+            $pubKey = file_get_contents(App::$param["path"] . "app/conf/public.key");
+            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt(:viewer, dearmor('$pubKey'))";
+        } else {
+            $sql = "UPDATE settings.viewer SET viewer=:viewer";
+        }
+        $res = $this->prepare($sql);
+        $this->execute($res, [":viewer" => json_encode($arr)]);
+        $this->clearCacheOnSchemaChanges();
+    }
+
+    /**
+     * @param object $extentrestrict
+     * @return array
+     * @throws InvalidArgumentException
+     */
+    public function updateExtentRestrict(object $extentrestrict): array
     {
         $response = [];
-
         try {
             $arr = $this->getArray();
-        } catch (\PDOException $e) {
+        } catch (PDOException $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
             $response['code'] = 400;
@@ -154,135 +293,186 @@ class Setting extends Model
         }
 
         $obj = (array)$arr->extentrestricts;
-        $obj[\app\conf\Connection::$param['postgisschema']] = $extentrestrict->extent;
+        $obj[Connection::$param['postgisschema']] = $extentrestrict->extent;
         $arr->extentrestricts = $obj;
 
         $obj = (array)$arr->zoomrestricts;
-        $obj[\app\conf\Connection::$param['postgisschema']] = $extentrestrict->zoom;
+        $obj[Connection::$param['postgisschema']] = $extentrestrict->zoom;
         $arr->zoomrestricts = $obj;
 
-        if (\app\conf\App::$param["encryptSettings"]) {
-            $pubKey = file_get_contents(\app\conf\App::$param["path"] . "app/conf/public.key");
-            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt('" . json_encode($arr) . "', dearmor('{$pubKey}'))";
+        if (App::$param["encryptSettings"]) {
+            $pubKey = file_get_contents(App::$param["path"] . "app/conf/public.key");
+            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt('" . json_encode($arr) . "', dearmor('$pubKey'))";
         } else {
             $sql = "UPDATE settings.viewer SET viewer='" . json_encode($arr) . "'";
         }
         $this->execQuery($sql, "PDO", "transaction");
-        if (!$this->PDOerror) {
-            $response['success'] = true;
-            $response['message'] = ($extentrestrict->extent) ? "Extent locked" : "Extent unlocked";
+        $this->clearCacheOnSchemaChanges();
+        $response['success'] = true;
+        $response['message'] = ($extentrestrict->extent) ? "Extent locked" : "Extent unlocked";
+        return $response;
+    }
+
+    /**
+     * @param object $userGroup
+     * @return array
+     * @throws InvalidArgumentException
+     */
+    public function updateUserGroups(object $userGroup): array
+    {
+        $response = [];
+        $arr = $this->getArray();
+        $obj = $arr->userGroups;
+        foreach ((array)$userGroup as $key => $value) {
+            if ($value === "") {
+                unset($obj->$key);
+            } else {
+                $obj->$key = $value;
+            }
+        }
+        $arr->userGroups = $obj;
+        if (App::$param["encryptSettings"]) {
+            $pubKey = file_get_contents(App::$param["path"] . "app/conf/public.key");
+            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt('" . json_encode($arr) . "', dearmor('$pubKey'))";
         } else {
-            $response['success'] = false;
-            $response['message'] = $this->PDOerror;
-            $response['code'] = 400;
+            $sql = "UPDATE settings.viewer SET viewer='" . json_encode($arr) . "'";
+        }
+        $this->execQuery($sql, "PDO", "transaction");
+        $this->clearCacheOnSchemaChanges();
+        $response['success'] = true;
+        $response['message'] = "Usergroups updated";
+        return $response;
+    }
+
+    /**
+     * @param bool $unsetPw
+     * @return array
+     * @throws InvalidArgumentException
+     */
+    public function get(bool $unsetPw = false): array
+    {
+        $cacheType = "settings";
+        $user = Model::toAscii(str:$_SESSION['screen_name'] ?? '', skipEmail: false);
+        $cacheId = $this->postgisdb . "_" . $cacheType . "_" . $user; // Cache per user because personal API key is stored
+        $CachedString = Cache::getItem($cacheId);
+        if ($CachedString != null && $CachedString->isHit()) {
+            $response = $CachedString->get();
+            try {
+                $response["cache"]["hit"] = $CachedString->getCreationDate();
+                $response["cache"]["tags"] = $CachedString->getTags();
+            } catch (PhpfastcacheLogicException $exception) {
+                $response["cache"] = $exception->getMessage();
+            }
+            $response["cache"]["signature"] = md5(serialize($response));
+        } else {
+            $arr = $this->getArray();
+            if (!empty($_SESSION["subuser"])) {
+                $arr->pw = $arr->pw_subuser->{$_SESSION["screen_name"]} ?? null;
+                $arr->api_key = isset($arr->api_key_subuser) ? ($arr->api_key_subuser->{$_SESSION["screen_name"]} ?? null) : null;
+                if (isset($arr->pw_subuser)) unset($arr->pw_subuser);
+            }
+            // If user has no key, we generate one.
+            if (!$arr->api_key) {
+                $res = $this->updateApiKey();
+                $arr->api_key = $res['key'];
+            }
+            if ($unsetPw) {
+                unset($arr->pw);
+            }
+            $response['success'] = true;
+            $response['data'] = $arr;
+
+            // Get userGroups from mapcentia database
+            $users = new Model(new \app\inc\Connection(database: Globals::$userDatabase));
+            $sQuery = "SELECT * FROM users WHERE parentdb = :parentDb";
+            $users->connect();
+            $res = $users->prepare($sQuery);
+            $this->execute($res, [":parentDb" => $this->postgisdb]);
+            $rows = $this->fetchAll($res);
+            $userGroups = [];
+            foreach ($rows as $row) {
+                $userGroups[$row["screenname"]] = $row["usergroup"];
+            }
+            $response["data"]->userGroups = (object)$userGroups;
+            Database::setDb($this->postgisdb);
+            $CachedString->set($response)->expiresAfter(Globals::$cacheTtl);//in seconds, also accepts Datetime
+            Cache::save($CachedString);
+            $response["cache"]["hit"] = false;
         }
         return $response;
     }
 
     /**
-     * @param $userGroup
      * @return array
      */
-    public function updateUserGroups($userGroup) : array
-    {
-        $response = [];
-
-        try {
-            $arr = $this->getArray();
-        } catch (\PDOException $e) {
-            $response['success'] = false;
-            $response['message'] = $e->getMessage();
-            $response['code'] = 400;
-            return $response;
-        }
-
-        $obj = $arr->userGroups;
-        foreach ((array)$userGroup as $key => $value) {
-            $obj->$key = $value;
-        }
-        $arr->userGroups = $obj;
-        if (\app\conf\App::$param["encryptSettings"]) {
-            $pubKey = file_get_contents(\app\conf\App::$param["path"] . "app/conf/public.key");
-            $sql = "UPDATE settings.viewer SET viewer=pgp_pub_encrypt('" . json_encode($arr) . "', dearmor('{$pubKey}'))";
-        } else {
-            $sql = "UPDATE settings.viewer SET viewer='" . json_encode($arr) . "'";
-        }
-        $this->execQuery($sql, "PDO", "transaction");
-        if (!$this->PDOerror) {
-            $response['success'] = true;
-            $response['message'] = "Usergroups updated";
-        } else {
-            $response['success'] = false;
-            $response['message'] = $this->PDOerror;
-            $response['code'] = 400;
-        }
-        return $response;
-    }
-
-    public function get($unsetPw = false)
-    {
-        try {
-            $arr = $this->getArray();
-        } catch (\PDOException $e) {
-            $response['success'] = false;
-            $response['message'] = $e->getMessage();
-            $response['code'] = 400;
-            return $response;
-
-        }
-
-        if ($_SESSION["subuser"]) {
-            $arr->pw = $arr->pw_subuser->{$_SESSION["subuser"]};
-            $arr->api_key = $arr->api_key_subuser->{$_SESSION["subuser"]};
-            unset($arr->api_key_subuser);
-            unset($arr->pw_subuser);
-        }
-        // If user has no key, we generate one.
-        if (!$arr->api_key) {
-            $res = $this->updateApiKey();
-            $arr->api_key = $res['key'];
-        }
-        if ($unsetPw) {
-            unset($arr->pw);
-        }
-        if (!$this->PDOerror) {
-            $response['success'] = true;
-            $response['data'] = $arr;
-        } else {
-            $response['success'] = false;
-            $response['message'] = $this->PDOerror;
-            $response['code'] = 400;
-        }
-        return $response;
-    }
-
-    public function getForPublic()
+    public function getForPublic(): array
     {
         $arr = $this->getArray();
-
         unset($arr->pw);
         unset($arr->pw_subuser);
         unset($arr->api_key);
         unset($arr->api_key_subuser);
-
-        if (!$this->PDOerror) {
-            $response['success'] = true;
-            $response['data'] = $arr;
-        } else {
-            $response['success'] = false;
-            $response['message'] = $this->PDOerror;
-            $response['code'] = 400;
-        }
+        $response['success'] = true;
+        $response['data'] = $arr;
         return $response;
     }
 
-    public function encryptPw($pass)
+    /**
+     * @return string|null
+     */
+    public function getApiKeyForSuperUser(): ?string
+    {
+        return $this->getArray()->api_key;
+    }
+
+    /**
+     * Password is required to have
+     * - at least one capital letter
+     * - at least one digit
+     * - be longer than 7 characters
+     *
+     * @param string $password
+     * @return array<string>
+     */
+    public static function checkPasswordStrength(string $password): array
+    {
+        $validationErrors = [];
+
+        if (strlen($password) < 8) {
+            $validationErrors[] = "has to be at least 8 characters long";
+        }
+
+        if (!preg_match("#[0-9]+#", $password)) {
+            $validationErrors[] = "must include at least one number";
+        }
+
+        if (!preg_match("#[A-Z]+#", $password)) {
+            $validationErrors[] = "must include at least one capital letter";
+        }
+
+        return $validationErrors;
+    }
+
+    /**
+     * @param string $password
+     * @return false|string|null
+     */
+    public static function encryptPwSecure(string $password): false|string|null
+    {
+        return password_hash($password, PASSWORD_BCRYPT);
+    }
+
+    /**
+     * @param string $pass
+     * @return string
+     */
+    public static function encryptPw(string $pass): string
     {
         $pass = strip_tags($pass);
         $pass = str_replace(" ", "", $pass); //remove spaces from password
         $pass = str_replace("%20", "", $pass); //remove escaped spaces from password
         $pass = addslashes($pass); //remove spaces from password
-        $pass = md5($pass); //encrypt password
-        return $pass;
+        //encrypt password
+        return md5($pass);
     }
 }

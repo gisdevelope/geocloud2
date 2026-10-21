@@ -1,0 +1,245 @@
+<?php
+/**
+ * @author     Martin Høgh <mh@mapcentia.com>
+ * @copyright  2013-2024 MapCentia ApS
+ * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
+ *
+ */
+
+namespace app\api\v4\controllers;
+
+use app\api\v4\AbstractApi;
+use app\api\v4\AcceptableAccepts;
+use app\api\v4\AcceptableContentTypes;
+use app\api\v4\AcceptableMethods;
+use app\api\v4\Controller;
+use app\api\v4\Responses\Response;
+use app\api\v4\Scope;
+use app\exceptions\GC2Exception;
+use app\inc\Connection;
+use app\inc\Input;
+use app\inc\Route2;
+use app\models\Table as TableModel;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
+use OpenApi\Attributes as OA;
+use Psr\Cache\InvalidArgumentException;
+use Symfony\Component\Validator\Constraints as Assert;
+
+#[OA\Info(version: '1.0.0', title: 'GC2 API', contact: new OA\Contact(email: 'mh@mapcentia.com'))]
+#[OA\Schema(
+    schema: "Index",
+    description: "Database indexes speed up lookups by keeping an ordered structure over one or more columns.",
+    required: ["columns"],
+    properties: [
+        new OA\Property(
+            property: "name",
+            title: "Name",
+            description: "Name of the index.",
+            type: "string",
+            example: "my-btree",
+        ),
+        new OA\Property(
+            property: "columns",
+            title: "Columns",
+            description: "Column(s) to include in the index.",
+            type: "array",
+            items: new OA\Items(type: "string"),
+            example: ["field1"]
+        ),
+        new OA\Property(
+            property: "method",
+            title: "The index method.",
+            description: "Index method to use.",
+            type: "string",
+            default: "btree",
+            enum: ["btree", "brin", "gin", "gist", "hash"],
+            example: "btree"
+        ),
+    ],
+    type: "object"
+)]
+#[OA\SecurityScheme(securityScheme: 'bearerAuth', type: 'http', name: 'bearerAuth', in: 'header', bearerFormat: 'JWT', scheme: 'bearer')]
+#[AcceptableMethods(['GET', 'POST', 'DELETE', 'HEAD', 'OPTIONS'])]
+#[Controller(route: '/api/v4/schemas/{schema}/tables/{table}/indices/[index]', scope: Scope::SUB_USER_ALLOWED)]
+class Index extends AbstractApi
+{
+
+    public function __construct(public readonly Route2 $route, Connection $connection)
+    {
+        parent::__construct($connection);
+        $this->resource = 'indices';
+    }
+
+    /**
+     * @throws GC2Exception
+     */
+    #[OA\Get(path: '/api/v4/schemas/{schema}/tables/{table}/indices/{index}', operationId: 'getIndex', description: "Get index(es).", tags: ['Schema'])]
+    #[OA\Parameter(name: 'schema', description: 'Schema', in: 'path', required: true, schema: new OA\Schema(type: 'string'), example: 'my_schema')]
+    #[OA\Parameter(name: 'table', description: 'Table', in: 'path', required: true, schema: new OA\Schema(type: 'string'), example: 'my_table')]
+    #[OA\Parameter(name: 'index', description: 'Index', in: 'path', required: false, schema: new OA\Schema(type: 'string'), example: 'my_index')]
+    #[OA\Response(response: 200, description: 'Ok', content: new OA\JsonContent(oneOf: [new OA\JsonContent(allOf: [new OA\Schema(properties: [
+        new OA\Property(property: "unique", description: "If the index has a unique constraint", type: "boolean", example: true)]),
+        new OA\Schema(ref: "#/components/schemas/Index")]
+    ), new OA\Schema(type: "array", items: new OA\Items(allOf: [new OA\Schema(properties: [
+        new OA\Property(property: "unique", description: "If the index has a unique constraint", type: "boolean", example: true)]),
+        new OA\Schema(ref: "#/components/schemas/Index")]))]))]
+    #[OA\Response(response: 404, description: 'Not found')]
+    #[AcceptableAccepts(['application/json', '*/*'])]
+    public function get_index(): Response
+    {
+        $r = [];
+        $res = self::getIndices($this->table[0]);
+        if (!empty($this->index)) {
+            foreach ($this->index as $index) {
+                foreach ($res as $i) {
+                    if ($i['name'] == $index) {
+                        $r[] = $i;
+                    }
+                }
+            }
+            return $this->getResponse($r, single: count($r) == 1);
+        } else {
+            $r = $res;
+        }
+        return $this->getResponse($r);
+    }
+
+    /**
+     * @return Response
+     * @throws GC2Exception|InvalidArgumentException
+     */
+    #[OA\Post(path: '/api/v4/schemas/{schema}/tables/{table}/indices', operationId: 'postIndex', description: "Create index(es).", tags: ['Schema'])]
+    #[OA\Parameter(name: 'schema', description: 'Name of schema', in: 'path', required: true, schema: new OA\Schema(type: 'string'), example: 'my_schema')]
+    #[OA\Parameter(name: 'table', description: 'Name of table', in: 'path', required: true, schema: new OA\Schema(type: 'string'), example: 'my_table')]
+    #[OA\RequestBody(description: 'Index to create.', required: true, content: new OA\JsonContent(oneOf: [new OA\Schema(ref: "#/components/schemas/Index"),
+        new OA\Schema(type: "array", items: new OA\Items(ref: "#/components/schemas/Index"))])
+    )]
+    #[OA\Response(response: 201, description: 'Created', links: [new OA\Link('', null, null, 'getIndex')])]
+    #[OA\Response(response: 400, description: 'Bad request')]
+    #[AcceptableContentTypes(['application/json'])]
+    public function post_index(): Response
+    {
+        $body = Input::getBody();
+        $data = json_decode($body);
+        $list = [];
+        if (!is_array($data)) {
+            $data = [$data];
+        }
+        $this->table[0]->withTransaction(function () use (&$list, $data) {
+            foreach ($data as $datum) {
+                $name = $datum->name ?? null;
+                $method = $datum->method ?? "btree";
+                $columns = $datum->columns;
+                $list[] = self::addIndices($this->table[0], $columns, $method, $name);
+            }
+        });
+        $baseUri = "/api/v4/schemas/{$this->schema[0]}/tables/{$this->unQualifiedName[0]}/indices/";
+        return $this->postResponse($baseUri, $list);
+    }
+
+
+    public static function getIndices(TableModel $table): array
+    {
+
+        $res = [];
+        $res2 = [];
+        $split = explode('.', $table->table);
+        $indices = $table->getIndexes($split[0], $split[1])['indices'];
+        foreach ($indices as $index) {
+            $res[$index['index']]['columns'][] = $index['column_name'];
+            $res[$index['index']]['method'] = $index['index_method'];
+            $res[$index['index']]['unique'] = $index['is_unique'];
+        }
+        foreach ($res as $key => $value) {
+            $res2[] = [
+                "name" => $key,
+                "method" => $value['method'],
+                "unique" => $value['unique'],
+                "columns" => $value['columns'],
+            ];
+        }
+        return $res2;
+    }
+
+    /**
+     * @throws InvalidArgumentException
+     */
+    public static function addIndices(TableModel $table, array $columns, string $method, ?string $name = null): string
+    {
+        return $table->addIndex($columns, $method, $name);
+    }
+
+    public function patch_index(): Response
+    {
+        // TODO: Implement put_index() method.
+    }
+
+    #[OA\Delete(path: '/api/v4/schemas/{schema}/tables/{table}/indices/{index}', operationId: 'deleteIndex', description: "Delete index(es).", tags: ['Schema'])]
+    #[OA\Parameter(name: 'schema', description: 'Name of schema', in: 'path', required: true, schema: new OA\Schema(type: 'string'), example: 'my_schema')]
+    #[OA\Parameter(name: 'table', description: 'Name of table', in: 'path', required: true, schema: new OA\Schema(type: 'string'), example: 'my_table')]
+    #[OA\Parameter(name: 'index', description: 'Index name(s)', in: 'path', required: true, example: 'my_index')]
+    #[OA\Response(response: 204, description: "Index deleted")]
+    #[OA\Response(response: 404, description: 'Not found')]
+    public function delete_index(): Response
+    {
+        $this->table[0]->withTransaction(function () {
+            foreach ($this->index as $index) {
+                $this->table[0]->dropIndex($index);
+            }
+        });
+        return $this->deleteResponse();
+    }
+
+    /**
+     * @throws GC2Exception
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    public function validate(): void
+    {
+        $table = $this->route->getParam("table");
+        $schema = $this->route->getParam("schema");
+        $id = $this->route->getParam("index");
+        $body = Input::getBody();
+
+        // Patch and delete on collection is not allowed
+        if (empty($id) && in_array(Input::getMethod(), ['patch', 'delete'])) {
+            throw new GC2Exception("PATCH and DELETE on a indices collection is not allowed.", 400);
+        }
+
+        // Throw exception if tried with table resource
+        if (Input::getMethod() == 'post' && !empty($id)) {
+            $this->postWithResource();
+        }
+        $collection = self::getAssert();
+        $this->validateRequest($collection, $body, Input::getMethod());
+        $this->initiate(schema: $schema, relation: $table, key: $id, index: $id);
+    }
+
+    static public function getAssert(): Assert\Collection
+    {
+        return new Assert\Collection([
+            'name' => new Assert\Optional([
+                new Assert\NotBlank()
+            ]),
+            'columns' => new Assert\Required([
+                new Assert\Type('array'),
+                new Assert\Count(min: 1),
+                new Assert\All([
+                    new Assert\NotBlank()
+                ]),
+            ]),
+            'method' => new Assert\Optional([
+                new Assert\Type('string'),
+                new Assert\Choice(['btree', 'brin', 'gin', 'gist', 'hash']),
+            ]),
+            'unique' => new Assert\Optional([
+                new Assert\Type('boolean'),
+            ]),
+        ]);
+    }
+
+    public function put_index(): Response
+    {
+        // TODO: Implement put_index() method.
+    }
+}

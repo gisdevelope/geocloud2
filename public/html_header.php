@@ -2,7 +2,29 @@
 header('Content-Type: text/html; charset=utf-8');
 ?>
 <!DOCTYPE html>
-<html>
+<!--
+
+     .----------------.  .----------------.  .----------------.
+    | .--------------. || .--------------. || .--------------. |
+    | |    ______    | || |     ______   | || |    _____     | |
+    | |  .' ___  |   | || |   .' ___  |  | || |   / ___ `.   | |
+    | | / .'   \_|   | || |  / .'   \_|  | || |  |_/___) |   | |
+    | | | |    ____  | || |  | |         | || |   .'____.'   | |
+    | | \ `.___]  _| | || |  \ `.___.'\  | || |  / /____     | |
+    | |  `._____.'   | || |   `._____.'  | || |  |_______|   | |
+    | |              | || |              | || |              | |
+    | '--------------' || '--------------' || '--------------' |
+     '----------------'  '----------------'  '----------------'
+    What we call the beginning is often the end. And to make an end is to make a beginning.
+
+
+  ~ @author     Martin Høgh <mh@mapcentia.com>
+  ~ @copyright  2013-2026 MapCentia ApS
+  ~ @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
+  ~ @version    2026.10.5
+
+  -->
+<html lang="en">
 <head>
     <title>GC2 Admin</title>
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8"/>
@@ -16,6 +38,7 @@ header('Content-Type: text/html; charset=utf-8');
     <meta name="author" content="Martin Hoegh"/>
     <link rel="shortcut icon" href="/favicon.ico" type="image/x-icon">
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
+    <script type="text/javascript">var parentdb = '<?php echo $_SESSION['parentdb']; ?>'</script>
     <script type="text/javascript">var screenName = '<?php echo $_SESSION['screen_name']; ?>'</script>
     <script type="text/javascript">var subUser = <?php echo ($_SESSION['subuser'])?"'{$_SESSION['subuser']}'":"false"; ?></script>
     <script type="text/javascript">var schema = '<?php echo (Input::getPath()->part(3)) ? Input::getPath()->part(3) : "public"; ?>'</script>

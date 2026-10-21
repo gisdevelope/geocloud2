@@ -1,58 +1,67 @@
 <?php
 /**
- * Long description for file
- *
- * Long description for file (if any)...
- *
- * @category   API
- * @package    app\controllers
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2021 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
- * @since      File available since Release 2013.1
  *
  */
 
 namespace app\controllers\upload;
 
-use \app\conf\App;
-use \app\conf\Connection;
-use \app\inc\Input;
-use \app\inc\Model;
-use \app\controllers\Tilecache;
+use app\conf\App;
+use app\conf\Connection;
+use app\exceptions\GC2Exception;
+use app\inc\Controller;
+use app\inc\Input;
+use app\inc\Model;
+use app\inc\Util;
+use app\models\Database;
+use app\controllers\Tilecache;
+use app\models\Layer;
+use app\models\Spatial_ref_sys;
+use app\models\Table;
+use Exception;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
+use Phpfastcache\Exceptions\PhpfastcacheLogicException;
+use Psr\Cache\InvalidArgumentException;
 
-/**
- * Class Processqgis
- * @package app\controllers\upload
- */
-class Processqgis extends \app\inc\Controller
+class Processqgis extends Controller
 {
-    private $table;
-    private $layer;
-    private $qgis;
-    private $sridStr;
+    private Table $table;
+    private Layer $layer;
+    private \app\models\Qgis $qgis;
+    private string $sridStr;
 
     function __construct()
     {
         parent::__construct();
-        $this->table = new \app\models\Table("settings.geometry_columns_join");
-        $this->layer = new \app\models\Layer();
+        $this->table = new Table("settings.geometry_columns_join");
+        $this->layer = new Layer();
         $this->qgis = new \app\models\Qgis();
-        $this->sridStr = "EPSG:4326 EPSG:3857 EPSG:900913 EPSG:25832";
+        $this->sridStr = "EPSG:4326 EPSG:3857 EPSG:25832";
     }
 
-    public function get_index()
+    /**
+     * @param array|null $file
+     * @return array
+     * @throws PhpfastcacheInvalidArgumentException
+     * @throws PhpfastcacheLogicException
+     * @throws InvalidArgumentException
+     * @throws GC2Exception
+     */
+    public function get_index(?array $file = null): array
     {
-        $file = Input::get("file");
-        $qgs = @simplexml_load_file(App::$param['path'] . "/app/tmp/" . Connection::$param["postgisdb"] . "/__qgis/" . $file);
+        $file = !empty($file) ? $file[0] : Input::get("file");
+        $filePath = App::$param['path'] . "/app/tmp/" . Connection::$param["postgisdb"] . "/__qgis/" . $file;
+        $qgs = @simplexml_load_file($filePath);
         $arrT = [];
         $arrG = [];
         $arrN = [];
         $wmsNames = [];
         $wmsSrids = [];
         $treeOrder = [];
-        $createWms = Input::get("createWms") == "true" ? true : false;
-        $createComp = Input::get("createComp") == "true" ? true : false;
+        $createWms = Input::get("createWms") == "true";
+        $createComp = Input::get("createComp") == "true";
 
         if (!$qgs) {
             return array("success" => false, "code" => 400, "message" => "Could not read qgs file");
@@ -60,7 +69,6 @@ class Processqgis extends \app\inc\Controller
 
         $ver = explode(".", $qgs->attributes()["version"]);
 
-        $majorVer = $ver[0];
         $minorVer = $ver[1];
 
         foreach ($qgs->projectlayers[0]->maplayer as $maplayer) {
@@ -72,9 +80,28 @@ class Processqgis extends \app\inc\Controller
                 case "postgres":
                     $dataSource = (string)$maplayer->datasource;
                     $layerName = (string)$maplayer->layername;
-                    $newDataSource = preg_replace("/host=\S*/", "host=" . Connection::$param["postgishost"], $dataSource, 1);
+
+                    preg_match('/table=\S*/', $dataSource, $matches, PREG_OFFSET_CAPTURE);
+                    preg_match_all('/"(\w+)"/', $matches[0][0], $matches, PREG_OFFSET_CAPTURE);
+
+                    $schema = $matches[1][0][0];
+                    $table = $matches[1][1][0];
+                    $fullTable = $schema . "." . $table;
+
+                    $db = Database::getDb();
+                    $rec = $this->layer->getAll($db, true, $fullTable);
+                    $pkey = $rec["data"][0]["pkey"];
+                    $srid = $rec["data"][0]["srid"];
+                    $type = $rec["data"][0]["type"];
+                    $f_geometry_column = $rec["data"][0]["f_geometry_column"];
+
+                    // Check if layer is versioned and if so, add a WHERE clause.
+                    $where = $this->layer->doesColumnExist("$schema.$table", "gc2_version_gid")["exists"] ? "gc2_version_end_date IS NULL" : "";
+
+                    $PGDataSource = "dbname=$db host=" . Connection::$param["postgishost"] . " port=" . Connection::$param["postgisport"] . " user=" . Connection::$param["postgisuser"] . " password=" . Connection::$param["postgispw"] . " sslmode=disable key='$pkey' srid=$srid type=$type table=\"$schema\".\"$table\" ($f_geometry_column) sql=$where";
+
                     preg_match("/table=\S*/", $dataSource, $matches);
-                    $maplayer->datasource = $newDataSource;
+                    $maplayer->datasource = $PGDataSource;
                     preg_match_all("/\"(.*?)\"/", $matches[0], $t);
                     $arrT[] = $t;
                     preg_match_all("/\((.*?)\)/", $dataSource, $g);
@@ -101,23 +128,15 @@ class Processqgis extends \app\inc\Controller
                         parse_str($parsed["query"], $result);
                         $table = explode(":", $result["TYPENAME"])[1];
                     }
-
-                    $db = explode("/", $parsed["path"])[2];
-
-                    $split = explode("@", $db);
-                    if (sizeof($split) > 1) {
-                        $db = $split[1];
-                    }
-
+                    $db = Util::extractUserFromSubUserString(explode("/", $parsed["path"])[2])[1];
                     $fullTable = $schema . "." . $table;
-
-                    $rec = $this->layer->getAll($fullTable, false, true);
+                    $rec = $this->layer->getAll($db, true, $fullTable);
                     $pkey = $rec["data"][0]["pkey"];
                     $srid = $rec["data"][0]["srid"];
                     $type = $rec["data"][0]["type"];
                     $f_geometry_column = $rec["data"][0]["f_geometry_column"];
 
-                    $spatialRefSys = new \app\models\Spatial_ref_sys();
+                    $spatialRefSys = new Spatial_ref_sys();
                     $spatialRefSysRow = $spatialRefSys->getRowBySrid($srid);
 
                     $proj4text = $spatialRefSysRow["data"]["proj4text"];
@@ -127,14 +146,14 @@ class Processqgis extends \app\inc\Controller
                     $arrN[] = $fullTable;
 
                     // Check if layer is versioned and if so, add a WHERE clause.
-                    $where = $this->layer->doesColumnExist("{$schema}.{$table}", "gc2_version_gid")["exists"] ? "gc2_version_end_date IS NULL" : "";
+                    $where = $this->layer->doesColumnExist("$schema.$table", "gc2_version_gid")["exists"] ? "gc2_version_end_date IS NULL" : "";
 
-                    $PGDataSource = "dbname={$db} host=" . Connection::$param["postgishost"] . " port=" . Connection::$param["postgisport"] . " user=" . Connection::$param["postgisuser"] . " password=" . Connection::$param["postgispw"] . " sslmode=disable key='{$pkey}' srid={$srid} type={$type} table=\"{$schema}\".\"{$table}\" ({$f_geometry_column}) sql={$where}";
+                    $PGDataSource = "dbname=$db host=" . Connection::$param["postgishost"] . " port=" . Connection::$param["postgisport"] . " user=" . Connection::$param["postgisuser"] . " password=" . Connection::$param["postgispw"] . " sslmode=disable key='$pkey' srid=$srid type=$type table=\"$schema\".\"$table\" ($f_geometry_column) sql=$where";
 
                     $maplayer->srs->spatialrefsys = "";
                     $maplayer->srs->spatialrefsys->proj4 = $proj4text;
                     $maplayer->srs->spatialrefsys->srid = $srid;
-                    $maplayer->srs->spatialrefsys->authid = "EPSG:{$srid}";
+                    $maplayer->srs->spatialrefsys->authid = "EPSG:$srid";
                     $maplayer->provider = "postgres";
                     $maplayer->datasource = $PGDataSource;
                     $maplayer->layername = $fullTable;
@@ -144,7 +163,7 @@ class Processqgis extends \app\inc\Controller
 
                 case "wms":
                     if ($createWms) {
-                        $layerName = Connection::$param["postgisschema"] . "." . Model::toAscii(is_numeric(mb_substr((string)$maplayer->layername, 0, 1, 'utf-8')) ? "_" . (string)$maplayer->layername : (string)$maplayer->layername, array(), "_");
+                        $layerName = Connection::$param["postgisschema"] . "." . Model::toAscii(is_numeric(mb_substr((string)$maplayer->layername, 0, 1, 'utf-8')) ? "_" . $maplayer->layername : (string)$maplayer->layername, array(), "_");
                         $srid = (string)$maplayer->srs->spatialrefsys->srid;
                         $wmsSrids[] = $srid;
                         $wmsNames[] = $layerName;
@@ -181,15 +200,13 @@ class Processqgis extends \app\inc\Controller
             $tableName = $arrT[$i][1][0] . "." . $arrT[$i][1][1];
             $layerKey = $tableName . "." . $arrG[$i][1][0];
             $wmsLayerName = $arrN[$i];
-            $layers[] = $layerKey;
-            $url = "http://127.0.0.1/cgi-bin/qgis_mapserv.fcgi?map=" . $path . $name . "&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=&FORMAT=image/png&LAYER=" . $wmsLayerName . "&transparent=true&";
+            $layers[] = $layerKey . " (" . $provider . ")";
+            $url = App::$param["mapCache"]["wmsHost"] . "/cgi-bin/qgis_mapserv.fcgi?map=" . $path . $name . "&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=&FORMAT=image/png&LAYER=" . $wmsLayerName . "&transparent=true&";
             $urls[] = $url;
-            $data = new \stdClass;
-            $data->_key_ = $layerKey;
-            $data->wmssource = $url;
-            $data->wmsclientepsgs = $this->sridStr;
-            $data = array("data" => $data);
-            $res = $this->table->updateRecord($data, "_key_");
+            $data['_key_'] = $layerKey;
+            $data['wmssource'] = $url;
+            $data['wmsclientepsgs'] = $this->sridStr;
+            $this->table->updateRecord($data, "_key_");
             Tilecache::bust($tableName);
         }
 
@@ -198,15 +215,13 @@ class Processqgis extends \app\inc\Controller
         for ($i = 0; $i < sizeof($wmsNames); $i++) {
             $tableName = $wmsNames[$i];
             $layerKey = $tableName . ".rast";
-            $table = new \app\models\Table($tableName);
-            $table->createAsRasterTable($wmsSrids[$i]);
-            $url = "http://127.0.0.1/cgi-bin/qgis_mapserv.fcgi?map=" . $path . $name . "&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=&FORMAT=image/png&LAYER=" . $tableName . "&transparent=true&";
-            $data = new \stdClass();
-            $data->_key_ = $layerKey;
-            $data->wmssource = $url;
-            $data->wmsclientepsgs = $this->sridStr;
-            $data = array("data" => $data);
-            $res = $this->table->updateRecord($data, "_key_");
+            $table = new Table($tableName);
+            $table->createAsRasterTable((int)$wmsSrids[$i]);
+            $url = App::$param["mapCache"]["wmsHost"] . "/cgi-bin/qgis_mapserv.fcgi?map=" . $path . $name . "&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=&FORMAT=image/png&LAYER=" . $tableName . "&transparent=true&";
+            $data['_key_'] = $layerKey;
+            $data['wmssource'] = $url;
+            $data['wmsclientepsgs'] = $this->sridStr;
+            $this->table->updateRecord($data, "_key_");
             Tilecache::bust($tableName);
         }
 
@@ -215,18 +230,14 @@ class Processqgis extends \app\inc\Controller
         if ($createComp) {
             $tableName = Connection::$param["postgisschema"] . "." . Model::toAscii($firstName);
             $layerKey = $tableName . ".rast";
-            $table = new \app\models\Table($tableName);
-            $table->createAsRasterTable("4326");
-            $url = "http://127.0.0.1/cgi-bin/qgis_mapserv.fcgi?map=" . $path . $name . "&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=&FORMAT=image/png&LAYER=" . implode(",", array_reverse($treeOrder)) . "&transparent=true&";
-            $data = new \stdClass();
-            $data->_key_ = $layerKey;
-            $data->wmssource = $url;
-            $data->wmsclientepsgs = "EPSG:4326 EPSG:3857 EPSG:900913 EPSG:25832";
-
-            $data = array("data" => $data);
-            $res = $this->table->updateRecord($data, "_key_");
+            $table = new Table($tableName);
+            $table->createAsRasterTable();
+            $url = App::$param["mapCache"]["wmsHost"] . "/cgi-bin/qgis_mapserv.fcgi?map=" . $path . $name . "&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&STYLES=&FORMAT=image/png&LAYER=" . implode(",", array_reverse($treeOrder)) . "&transparent=true&";
+            $data['_key_'] = $layerKey;
+            $data['wmssource'] = $url;
+            $data['wmsclientepsgs'] = "EPSG:4326 EPSG:3857 EPSG:25832";
+            $this->table->updateRecord($data, "_key_");
             Tilecache::bust(Connection::$param["postgisschema"] . "." . $wmsNames[$i]);
-
         }
 
         // Write the new qgs-file
@@ -240,6 +251,7 @@ class Processqgis extends \app\inc\Controller
         if (!$w) {
             return ["success" => false, "message" => "Couldn't write file: " . $name, "code" => 401];
         }
+        touch($path . $name, filemtime($filePath));
         fclose($fh);
 
         // Write the a copy of the qgs-file with out hash
@@ -254,6 +266,7 @@ class Processqgis extends \app\inc\Controller
         if (!$w) {
             return ["success" => false, "message" => "Couldn't write file: " . $nameWithoutHash, "code" => 401];
         }
+        touch($path . $nameWithoutHash, filemtime($filePath));
         fclose($fh);
 
         $resDb = $this->qgis->insert([
@@ -271,9 +284,12 @@ class Processqgis extends \app\inc\Controller
         return ["success" => true, "version" => $minorVer, "message" => "Qgs file parsed", "reloaded" => $reloaded, "ch" => $path . $name, "layers" => $layers, "urls" => $urls];
     }
 
-    public static function reload()
+    /**
+     * @return bool|string
+     * @throws Exception
+     */
+    public static function reload(): bool|string
     {
-        $res = \app\inc\Util::wget(App::$param["qgisServer"]["api"] . "/reload");
-        return $res;
+        return Util::wget(App::$param["qgisServer"]["api"] . "/reload");
     }
 }

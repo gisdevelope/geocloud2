@@ -1,0 +1,1641 @@
+<?php
+/**
+ * @author     Martin Høgh <mh@mapcentia.com>
+ * @copyright  2013-2025 MapCentia ApS
+ * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
+ *
+ */
+
+namespace app\inc;
+
+use app\exceptions\GC2Exception;
+use app\exceptions\GraphQLException;
+use app\inc\Model as IncModel;
+use app\models\Sql as SqlModel;
+use app\models\Table as TableModel;
+use GraphQL\Language\AST\BooleanValueNode;
+use GraphQL\Language\AST\FieldNode;
+use GraphQL\Language\AST\FloatValueNode;
+use GraphQL\Language\AST\IntValueNode;
+use GraphQL\Language\AST\ListValueNode;
+use GraphQL\Language\AST\NullValueNode;
+use GraphQL\Language\AST\ObjectValueNode;
+use GraphQL\Language\AST\OperationDefinitionNode;
+use GraphQL\Language\AST\StringValueNode;
+use GraphQL\Language\AST\ValueNode;
+use GraphQL\Language\AST\VariableNode;
+use GraphQL\Language\Parser as GraphQLParser;
+use GraphQL\Type\Definition\CustomScalarType;
+use GraphQL\Type\Definition\ObjectType;
+use GraphQL\Type\Definition\Type;
+use GraphQL\Type\Schema;
+use GraphQL\GraphQL as GraphQLBase;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
+
+class GraphQL
+{
+    private string $user;
+    private string $schema;
+    private SqlModel $api;
+    private bool $subuser;
+    private ?array $userGroup;
+    private string $opType;
+    private array $typeCache = [];
+    /** @var array<string, array{toCol: array<string,string>, toField: array<string,string>}> */
+    private array $fieldMaps = [];
+
+    function __construct(private readonly Connection $connection, private readonly bool $convertReturning = true)
+    {
+
+    }
+
+
+    /**
+     * Very small dispatcher for a constrained subset of GraphQL-like queries.
+     *
+     * @param string $user
+     * @param SqlModel $api
+     * @param string $query
+     * @param string $schema
+     * @param bool $subuser
+     * @param array<int,string>|null $userGroup
+     * @param array $variables
+     * @param string|null $operationName
+     * @return array{data: array|null, errors?: array}
+     * @throws GraphQLException|PhpfastcacheInvalidArgumentException
+     */
+    public function run(string $user, SqlModel $api, string $query, string $schema, bool $subuser, ?array $userGroup, array $variables, ?string $operationName = null): array
+    {
+        $this->user = $user;
+        $this->api = $api;
+        $this->subuser = $subuser;
+        $this->userGroup = $userGroup;
+        $this->schema = $schema;
+
+        try {
+            $doc = GraphQLParser::parse($query);
+        } catch (\Throwable $e) {
+            throw new GraphQLException('GraphQL parse error: ' . $e->getMessage(), 400);
+        }
+
+        // Select operation
+        $operation = null;
+        foreach ($doc->definitions as $def) {
+            if ($def instanceof OperationDefinitionNode) {
+                if ($operationName === null || ($def->name?->value === $operationName)) {
+                    $operation = $def;
+                    if ($operationName !== null) {
+                        break;
+                    }
+                }
+            }
+        }
+        if (!$operation) {
+            throw new GraphQLException('No operation found in document', 400);
+        }
+
+        $this->opType = strtolower($operation->operation);
+        $opName = $operation->name?->value;
+        $isIntrospection = $this->isIntrospectionQuery($operation);
+
+        if (!$isIntrospection) {
+            $selections = $operation->selectionSet?->selections ?? [];
+            if (empty($selections)) {
+                throw new GraphQLException('No fields selected', 400);
+            }
+            foreach ($selections as $index => $selectionNode) {
+                if (!$selectionNode instanceof FieldNode) {
+                    throw new GraphQLException('Unsupported selection at root', 400);
+                }
+                $field = $selectionNode->name->value;
+                if (!preg_match('/^[a-z][A-Za-z0-9]*$/', $field)) {
+                    throw new GraphQLException("Invalid root field name '$field': must start with a lowercase letter and be in camelCase", 400);
+                }
+            }
+        }
+
+        $schema = $this->buildSchema();
+        $result = GraphQLBase::executeQuery(
+            schema: $schema,
+            source: $query,
+            variableValues: $variables,
+            operationName: $operationName
+        );
+
+        $output = $result->toArray();
+        if (!empty($output['errors'])) {
+            throw new GraphQLException($result->errors[0]->getMessage(), 400);
+        }
+        return $output;
+    }
+
+    private function isIntrospectionQuery(OperationDefinitionNode $operation): bool
+    {
+        foreach ($operation->selectionSet->selections as $selection) {
+            if ($selection instanceof FieldNode && (str_starts_with($selection->name->value, '__'))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function buildSchema(): Schema
+    {
+        $queryType = new ObjectType([
+            'name' => 'Query',
+            'fields' => fn() => $this->getQueryFields()
+        ]);
+
+        $mutationType = new ObjectType([
+            'name' => 'Mutation',
+            'fields' => fn() => $this->getMutationFields()
+        ]);
+
+        $subscriptionType = new ObjectType([
+            'name' => 'Subscription',
+            'fields' => fn() => $this->getSubscriptionFields()
+        ]);
+
+        return new Schema([
+            'query' => $queryType,
+            'mutation' => $mutationType,
+            'subscription' => $subscriptionType,
+        ]);
+    }
+
+    private function getQueryFields(): array
+    {
+        $fields = [];
+
+        // Add tables from the schema to be visible in introspection
+        $tableModel = new TableModel(table: null, connection: $this->connection);
+        try {
+            $tables = $tableModel->getRecords(false, $this->schema)['data'];
+        } catch (\Throwable) {
+            $tables = [];
+        }
+        foreach ($tables as $t) {
+            if (!$t['enableows']) {
+                continue;
+            }
+            $tableName = $t['f_table_name'];
+            $fieldName = 'get' . self::snakeToPascal($tableName);
+            $fields[$fieldName] = [
+                'type' => Type::listOf($this->getTableType($t['f_table_schema'], $tableName)),
+                'args' => [
+                    'id' => ['type' => Type::ID()],
+                    'where' => ['type' => $this->getGraphQLType('json')],
+                    'limit' => ['type' => Type::int()],
+                    'offset' => ['type' => Type::int()],
+                ],
+                'resolve' => function ($root, $args, $context, $info) {
+                    return $this->resolveField($info->fieldName, $args, null, $this->selectionTreeFromFieldNode($info->fieldNodes[0], $info->variableValues));
+                }
+            ];
+        }
+        return $fields;
+    }
+
+    private function getMutationFields(): array
+    {
+        $fields = [];
+        $tableModel = new TableModel(table: null, connection: $this->connection);
+        try {
+            $tables = $tableModel->getRecords(false, $this->schema)['data'];
+        } catch (\Throwable) {
+            $tables = [];
+        }
+        foreach ($tables as $t) {
+            if (!$t['enableows']) {
+                continue;
+            }
+            $tableName = $t['f_table_name'];
+            $pascalName = self::snakeToPascal($tableName);
+
+            $resolver = function ($root, $args, $context, $info) {
+                return $this->resolveField($info->fieldName, $args, null, $this->selectionTreeFromFieldNode($info->fieldNodes[0], $info->variableValues));
+            };
+
+            $fields['insert' . $pascalName] = [
+                'type' => Type::listOf($this->getTableType($t['f_table_schema'], $tableName)),
+                'args' => [
+                    'data' => ['type' => $this->getGraphQLType('json')],
+                    'objects' => ['type' => Type::listOf($this->getGraphQLType('json'))]
+                ],
+                'resolve' => $resolver
+            ];
+            $fields['update' . $pascalName] = [
+                'type' => Type::listOf($this->getTableType($t['f_table_schema'], $tableName)),
+                'args' => [
+                    'id' => ['type' => Type::ID()],
+                    'where' => ['type' => $this->getGraphQLType('json')],
+                    'data' => ['type' => $this->getGraphQLType('json')]
+                ],
+                'resolve' => $resolver
+            ];
+            $fields['delete' . $pascalName] = [
+                'type' => Type::listOf($this->getTableType($t['f_table_schema'], $tableName)),
+                'args' => [
+                    'id' => ['type' => Type::ID()],
+                    'where' => ['type' => $this->getGraphQLType('json')]
+                ],
+                'resolve' => $resolver
+            ];
+        }
+        return $fields;
+    }
+
+    private function getSubscriptionFields(): array
+    {
+        $fields = [];
+        $tableModel = new TableModel(table: null, connection: $this->connection);
+        try {
+            $tables = $tableModel->getRecords(false, $this->schema)['data'];
+        } catch (\Throwable) {
+            $tables = [];
+        }
+        $opSuffixes = [
+            'MessageAdded' => 'INSERT',
+            'MessageUpdated' => 'UPDATE',
+            'MessageDeleted' => 'DELETE',
+        ];
+        foreach ($tables as $t) {
+            if (!$t['enableows']) {
+                continue;
+            }
+            $tableName = $t['f_table_name'];
+            $pascalName = self::snakeToPascal($tableName);
+            foreach ($opSuffixes as $suffix => $op) {
+                $fieldName = $pascalName . $suffix;
+                $fields[$fieldName] = [
+                    'type' => Type::listOf($this->getTableType($t['f_table_schema'], $tableName)),
+                    'args' => [
+                        'where' => ['type' => Type::string()],
+                    ],
+                    'resolve' => fn() => null,
+                ];
+            }
+        }
+        return $fields;
+    }
+
+    /**
+     * Parse a GraphQL subscription query and extract table, operation, where, and columns.
+     *
+     * @param string $query The GraphQL subscription query string
+     * @param string $schema The database schema name
+     * @return array{rel: string, op: string, where: string, columns: string, field: string}
+     * @throws GraphQLException
+     */
+    public static function parseSubscription(string $query, string $schema): array
+    {
+        try {
+            $doc = GraphQLParser::parse($query);
+        } catch (\Throwable $e) {
+            throw new GraphQLException('Subscription parse error: ' . $e->getMessage(), 400);
+        }
+
+        $operation = null;
+        foreach ($doc->definitions as $def) {
+            if ($def instanceof OperationDefinitionNode && $def->operation === 'subscription') {
+                $operation = $def;
+                break;
+            }
+        }
+        if (!$operation) {
+            throw new GraphQLException('No subscription operation found', 400);
+        }
+
+        $selections = $operation->selectionSet?->selections ?? [];
+        if (empty($selections)) {
+            throw new GraphQLException('No fields selected in subscription', 400);
+        }
+
+        $opSuffixes = [
+            'MessageAdded' => 'INSERT',
+            'MessageUpdated' => 'UPDATE',
+            'MessageDeleted' => 'DELETE',
+        ];
+
+        $results = [];
+        foreach ($selections as $sel) {
+            if (!$sel instanceof FieldNode) {
+                continue;
+            }
+            $fieldName = $sel->name->value;
+
+            $matchedOp = null;
+            $tablePartPascal = null;
+            foreach ($opSuffixes as $suffix => $op) {
+                if (str_ends_with($fieldName, $suffix)) {
+                    $matchedOp = $op;
+                    $tablePartPascal = substr($fieldName, 0, -strlen($suffix));
+                    break;
+                }
+            }
+            if ($matchedOp === null || $tablePartPascal === null) {
+                throw new GraphQLException("Invalid subscription field: '$fieldName'. Expected format: {Table}MessageAdded|Updated|Deleted", 400);
+            }
+
+            $tableName = self::camelToSnake($tablePartPascal);
+
+            $where = '';
+            foreach ($sel->arguments ?? [] as $arg) {
+                if ($arg->name->value === 'where') {
+                    if ($arg->value instanceof StringValueNode) {
+                        $where = $arg->value->value;
+                    } elseif ($arg->value instanceof ObjectValueNode) {
+                        $whereArray = self::valueFromAstStatic($arg->value);
+                        $noParams = null;
+                        $where = self::buildWhereClause($whereArray, null, $noParams);
+                    }
+                }
+            }
+
+            $columns = [];
+            foreach ($sel->selectionSet?->selections ?? [] as $subSel) {
+                if ($subSel instanceof FieldNode) {
+                    $columns[] = $subSel->name->value;
+                }
+            }
+
+            $results[] = [
+                'rel' => $schema . '.' . $tableName,
+                'op' => $matchedOp,
+                'where' => $where,
+                'columns' => implode(',', $columns),
+                'field' => $fieldName,
+            ];
+        }
+
+        if (empty($results)) {
+            throw new GraphQLException('No valid subscription fields found', 400);
+        }
+
+        return $results;
+    }
+
+    /**
+     * Convert a GraphQL AST ValueNode to a plain PHP value (static version for use in parseSubscription).
+     */
+    private static function valueFromAstStatic(ValueNode $node): mixed
+    {
+        if ($node instanceof StringValueNode) {
+            return $node->value;
+        }
+        if ($node instanceof IntValueNode) {
+            return (int)$node->value;
+        }
+        if ($node instanceof FloatValueNode) {
+            return (float)$node->value;
+        }
+        if ($node instanceof BooleanValueNode) {
+            return (bool)$node->value;
+        }
+        if ($node instanceof NullValueNode) {
+            return null;
+        }
+        if ($node instanceof ListValueNode) {
+            $arr = [];
+            foreach ($node->values as $v) {
+                $arr[] = self::valueFromAstStatic($v);
+            }
+            return $arr;
+        }
+        if ($node instanceof ObjectValueNode) {
+            $obj = [];
+            foreach ($node->fields as $f) {
+                $obj[$f->name->value] = self::valueFromAstStatic($f->value);
+            }
+            return $obj;
+        }
+        return null;
+    }
+
+    /**
+     * Format a value as a literal for ShapeFilter parsing.
+     */
+    private static function filterLiteral(mixed $value): string
+    {
+        if (is_null($value)) {
+            return 'NULL';
+        }
+        if (is_bool($value)) {
+            return $value ? 'true' : 'false';
+        }
+        if (is_int($value) || is_float($value)) {
+            return (string)$value;
+        }
+        return "'" . str_replace(["\\", "'"], ["\\\\", "\\'"], (string)$value) . "'";
+    }
+
+    /**
+     * @throws GC2Exception
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    private function getTableType(string $schema, string $table): ObjectType
+    {
+        $typeName = self::snakeToPascal($table);
+        if (isset($this->typeCache[$typeName])) {
+            return $this->typeCache[$typeName];
+        }
+        $t = new TableModel(table: $schema . '.' . $table, lookupForeignTables: false, connection: $this->connection);
+        return $this->typeCache[$typeName] = new ObjectType([
+            'name' => $typeName,
+            'description' => self::sanitizeDescription($t->getComment()),
+            'fields' => function () use ($schema, $table, $t) {
+                try {
+                    $fields = [];
+                    $toField = $this->fieldMap($schema, $table)['toField'];
+                    foreach ($t->metaData ?? [] as $col => $info) {
+                        $type = isset($info['is_primary']) && $info['is_primary'] === true ? Type::ID() : $this->getGraphQLType($info['typname']);
+                        if (isset($info['is_nullable']) && $info['is_nullable'] === false) {
+                            $type = Type::nonNull($type);
+                        }
+                        // Postgres column names may contain characters (e.g. '.') that are not
+                        // valid GraphQL field names; expose a sanitized name and map it back to
+                        // the physical column in the SQL layer (see fieldMap/selectionToPhysical).
+                        $field = $toField[$col] ?? $col;
+                        $fields[$field] = ['type' => $type, 'description' => self::sanitizeDescription($info['comment'] ?? null)];
+                    }
+                    // Add relationships
+                    $fkMap = $this->buildForeignMap($schema, $table);
+                    foreach ($fkMap as $relName => $map) {
+                        $fieldName = self::snakeToCamel($relName);
+                        $fields[$fieldName] = [
+                            'type' => $this->getTableType($map['ref_schema'], $map['ref_table']),
+                            'args' => [
+                                'where' => ['type' => $this->getGraphQLType('json')],
+                                'schema' => ['type' => Type::string()],
+                            ]
+                        ];
+                    }
+                    return $fields;
+                } catch (\Throwable) {
+                    return ['error' => ['type' => Type::string()]];
+                }
+            }
+        ]);
+    }
+
+    private function getGraphQLType(string $pgType): Type
+    {
+        $pgType = strtolower(trim($pgType));
+        if (str_starts_with($pgType, '_')) {
+            return Type::listOf($this->getGraphQLType(substr($pgType, 1)));
+        }
+
+        return match ($pgType) {
+            'smallint', 'int2', 'int', 'integer', 'int4', 'serial', 'serial4' => Type::int(),
+            'float4', 'real', 'float8', 'double precision' => Type::float(),
+            'bool', 'boolean' => Type::boolean(),
+            'numeric', 'decimal', 'bigint', 'int8', 'bigserial', 'serial8' => Type::string(),
+            'json', 'jsonb', 'geometry' => $this->getJsonType(),
+            'timestamp', 'timestamptz' => $this->getDateTimeType(),
+            'date' => $this->getDateType(),
+            'time', 'timetz' => $this->getTimeType(),
+            'point' => $this->getTypeFromCache('Point', fn() => new ObjectType([
+                'name' => 'Point',
+                'fields' => [
+                    'x' => ['type' => Type::float()],
+                    'y' => ['type' => Type::float()],
+                ],
+                'description' => "The Point type represents a point with an x and y coordinate.",
+            ])),
+            'line' => $this->getTypeFromCache('Line', fn() => new ObjectType([
+                'name' => 'Line',
+                'fields' => [
+                    'A' => ['type' => Type::float()],
+                    'B' => ['type' => Type::float()],
+                    'C' => ['type' => Type::float()],
+                ],
+                'description' => "The Line type represents a line with an equation Ax + By + C = 0.",
+            ])),
+            'lseg' => $this->getTypeFromCache('Lseg', fn() => new ObjectType([
+                'name' => 'Lseg',
+                'fields' => [
+                    'start' => ['type' => $this->getGraphQLType('point')],
+                    'end' => ['type' => $this->getGraphQLType('point')],
+                ],
+                'description' => "The Lseg type represents a line segment with two opposite corners.",
+            ])),
+            'box' => $this->getTypeFromCache('Box', fn() => new ObjectType([
+                'name' => 'Box',
+                'fields' => [
+                    'start' => ['type' => $this->getGraphQLType('point')],
+                    'end' => ['type' => $this->getGraphQLType('point')],
+                ],
+                'description' => "The Box type represents a box with two opposite corners.",
+            ])),
+            'circle' => $this->getTypeFromCache('Circle', fn() => new ObjectType([
+                'name' => 'Circle',
+                'fields' => [
+                    'center' => ['type' => $this->getGraphQLType('point')],
+                    'radius' => ['type' => Type::float()],
+                ],
+                'description' => "The Circle type represents a circle with a center point and a radius.",
+            ])),
+            'interval' => $this->getTypeFromCache('Interval', fn() => new ObjectType([
+                'name' => 'Interval',
+                'fields' => [
+                    'y' => ['type' => Type::int()],
+                    'm' => ['type' => Type::int()],
+                    'd' => ['type' => Type::int()],
+                    'h' => ['type' => Type::int()],
+                    'i' => ['type' => Type::int()],
+                    's' => ['type' => Type::int()],
+                ],
+                'description' => "The Interval type represents a time interval, with years, months, days, hours, minutes and seconds.",
+            ])),
+            'path' => $this->getJsonType(),
+            'polygon' => Type::listOf($this->getGraphQLType('point')),
+            'int4range', 'int8range', 'numrange', 'tsrange', 'tstzrange', 'daterange' => $this->getRangeType($pgType),
+            default => Type::string(),
+        };
+    }
+
+    private function getJsonType(): Type
+    {
+        return $this->getTypeFromCache('JSON', fn() => new CustomScalarType([
+            'name' => 'JSON',
+            'serialize' => fn($v) => $v,
+            'parseValue' => fn($v) => $v,
+            'parseLiteral' => fn($node, $vars) => $this->valueFromAst($node, $vars ?? []),
+            'description' => "The JSON represents a JSON object or a JSON array.",
+        ]));
+    }
+
+    private function getDateTimeType(): Type
+    {
+        return $this->getTypeFromCache('DateTime', fn() => new CustomScalarType([
+            'name' => 'DateTime',
+            'serialize' => fn($v) => $v,
+            'parseValue' => fn($v) => $v,
+            'parseLiteral' => fn($node, $vars) => $this->valueFromAst($node, $vars ?? []),
+            'description' => "The DateTime type represents time in ISO 8601 format, e.g. '2023-01-01T12:34:56+02'.",
+        ]));
+    }
+
+    private function getDateType(): Type
+    {
+        return $this->getTypeFromCache('Date', fn() => new CustomScalarType([
+            'name' => 'Date',
+            'serialize' => fn($v) => $v,
+            'parseValue' => fn($v) => $v,
+            'parseLiteral' => fn($node, $vars) => $this->valueFromAst($node, $vars ?? []),
+            'description' => "The Date type represents dates in ISO 8601 format, e.g. '2023-01-01'.",
+        ]));
+    }
+
+    private function getTimeType(): Type
+    {
+        return $this->getTypeFromCache('Time', fn() => new CustomScalarType([
+            'name' => 'Time',
+            'serialize' => fn($v) => $v,
+            'parseValue' => fn($v) => $v,
+            'parseLiteral' => fn($node, $vars) => $this->valueFromAst($node, $vars ?? []),
+            'description' => "The Time type represents time in ISO 8601 format, e.g. '12:34:56'.",
+        ]));
+    }
+
+    private function getRangeType(string $pgType): Type
+    {
+        $name = self::snakeToPascal($pgType);
+        return $this->getTypeFromCache($name, function () use ($name, $pgType) {
+            $boundType = match (true) {
+                str_contains($pgType, 'int') => Type::int(),
+                str_contains($pgType, 'date') => $this->getDateType(),
+                str_contains($pgType, 'timestamp') => $this->getDateTimeType(),
+                default => Type::string(),
+            };
+
+            return new ObjectType([
+                'name' => $name,
+                'fields' => [
+                    'lower' => ['type' => $boundType],
+                    'upper' => ['type' => $boundType],
+                    'lowerInclusive' => ['type' => Type::boolean()],
+                    'upperInclusive' => ['type' => Type::boolean()],
+                ],
+                'description' => "The $name type represents a range, with lower and upper bounds of type $boundType.",
+            ]);
+        });
+    }
+
+    private function getTypeFromCache(string $name, callable $creator): Type
+    {
+        if (!isset($this->typeCache[$name])) {
+            $this->typeCache[$name] = $creator();
+        }
+        return $this->typeCache[$name];
+    }
+
+    public static function snakeToPascal(string $input): string
+    {
+        return str_replace('_', '', ucwords($input, '_'));
+    }
+
+    public static function snakeToCamel(string $input): string
+    {
+        return lcfirst(self::snakeToPascal($input));
+    }
+
+    /**
+     * Resolve variable values from input and operation definitions (defaults).
+     */
+    private function resolveVariables(OperationDefinitionNode $operation, array $inputVariables): array
+    {
+        $resolved = [];
+        foreach ($operation->variableDefinitions ?? [] as $def) {
+            $name = $def->variable->name->value;
+            if (array_key_exists($name, $inputVariables)) {
+                $resolved[$name] = $inputVariables[$name];
+            } elseif ($def->defaultValue !== null) {
+                $resolved[$name] = $this->valueFromAst($def->defaultValue, []);
+            }
+        }
+        return array_merge($inputVariables, $resolved);
+    }
+
+    private static function quoteIdent(string $name): string
+    {
+        return '"' . str_replace('"', '""', $name) . '"';
+    }
+
+    /**
+     * Bidirectional map between physical Postgres column names and GraphQL-valid field names
+     * for a table, cached per request. Columns whose name is already a valid GraphQL identifier
+     * keep their name; the rest are sanitized (invalid chars -> '_', leading digit prefixed with
+     * '_'), with collisions resolved by a numeric suffix.
+     *
+     * @return array{toCol: array<string,string>, toField: array<string,string>}
+     */
+    private function fieldMap(string $schema, string $table): array
+    {
+        $key = "$schema.$table";
+        if (isset($this->fieldMaps[$key])) {
+            return $this->fieldMaps[$key];
+        }
+        $t = new TableModel(table: $schema . '.' . $table, lookupForeignTables: false, connection: $this->connection);
+        $cols = array_keys($t->metaData ?? []);
+        $toCol = [];
+        $toField = [];
+        $used = [];
+        // Pass 1: reserve already-valid identifiers unchanged (so a sanitized name never
+        // steals a name that is a real column further down).
+        foreach ($cols as $col) {
+            if (preg_match('/^[_A-Za-z][_0-9A-Za-z]*$/', $col)) {
+                $toCol[$col] = $col;
+                $toField[$col] = $col;
+                $used[$col] = true;
+            }
+        }
+        // Pass 2: sanitize the invalid ones, avoiding collisions with reserved/generated names.
+        foreach ($cols as $col) {
+            if (isset($toField[$col])) {
+                continue;
+            }
+            $field = self::sanitizeFieldName($col, $used);
+            $toCol[$field] = $col;
+            $toField[$col] = $field;
+            $used[$field] = true;
+        }
+        return $this->fieldMaps[$key] = ['toCol' => $toCol, 'toField' => $toField];
+    }
+
+    /**
+     * Turns an arbitrary column name into a valid, unused GraphQL field name.
+     *
+     * @param array<string,bool> $used names already taken (mutated with the returned name)
+     */
+    private static function sanitizeFieldName(string $col, array &$used): string
+    {
+        $s = preg_replace('/[^_0-9A-Za-z]/', '_', $col);
+        if ($s === '' || !preg_match('/^[_A-Za-z]/', $s)) {
+            $s = '_' . $s;
+        }
+        $base = $s;
+        $n = 2;
+        while (isset($used[$s])) {
+            $s = $base . '_' . $n++;
+        }
+        return $s;
+    }
+
+    /**
+     * Rewrites a selection tree's scalar field names from their sanitized GraphQL names to the
+     * physical column names, so the existing SQL builders (which key everything by physical
+     * column) work unchanged. Nested relation fields (not columns) are left untouched. mapRows
+     * re-keys the output back to the sanitized names.
+     */
+    private function selectionToPhysical(?array $selection, string $schema, string $table): ?array
+    {
+        if (!is_array($selection)) {
+            return $selection;
+        }
+        $toCol = $this->fieldMap($schema, $table)['toCol'];
+        $out = [];
+        foreach ($selection as $alias => $v) {
+            if (isset($v['name'], $toCol[$v['name']])) {
+                $v['name'] = $toCol[$v['name']];
+            }
+            $out[$alias] = $v;
+        }
+        return $out;
+    }
+
+    private static function camelToSnake(string $input): string
+    {
+        return strtolower(preg_replace('/(?<!^)[A-Z]/', '_$0', $input));
+    }
+
+    private function partitionSelection(?array $selection, array $metaCols = []): array
+    {
+        // returns [columns[alias => name], nestedMap[alias => ['name' => name, 'selection' => selection]]]
+        $columns = [];
+        $nested = [];
+        if (is_array($selection)) {
+            foreach ($selection as $alias => $v) {
+                if ($v['selection'] === true || in_array($v['name'], $metaCols)) {
+                    $columns[$alias] = $v['name'];
+                } elseif (is_array($v['selection'])) {
+                    $nested[$alias] = $v;
+                }
+            }
+        }
+        return [$columns, $nested];
+    }
+
+    private function buildForeignMap(string $schema, string $table): array
+    {
+        // Key by referenced table name and by constraint name for convenience
+        $model = new IncModel(connection: $this->connection);
+        $res = $model->getConstrains($schema, $table, 'f');
+        $map = [];
+        if (($res['success'] ?? false) && is_array($res['data'] ?? null)) {
+            foreach ($res['data'] as $row) {
+                $conDef = (string)($row['con'] ?? '');
+                $conname = (string)($row['conname'] ?? '');
+                $localCol = (string)($row['column_name'] ?? '');
+                if ($conDef === '' || $localCol === '') {
+                    continue;
+                }
+                $parsed = $this->parseFkConstraintDef($conDef, $schema);
+                if (!$parsed) {
+                    continue;
+                }
+                $key = $parsed['ref_table'];
+                $entry = [
+                    'local_col' => $localCol,
+                    'ref_schema' => $parsed['ref_schema'],
+                    'ref_table' => $parsed['ref_table'],
+                    'ref_col' => $parsed['ref_col'],
+                    'constraint' => $conname,
+                ];
+                // Prefer to not overwrite an existing entry if same key; but last one wins in case of duplicates
+                $map[$key] = $entry;
+                if ($conname !== '') {
+                    $map[$conname] = $entry;
+                }
+            }
+        }
+        return $map;
+    }
+
+    private function parseFkConstraintDef(string $def, string $defaultSchema): ?array
+    {
+        // Example: FOREIGN KEY (child_id) REFERENCES public.parent(id) MATCH SIMPLE ...
+        $m = [];
+        if (!preg_match('/REFERENCES\s+([^\s(]+)\s*\(([^)]+)\)/i', $def, $m)) {
+            return null;
+        }
+        $targetIdent = trim($m[1]);
+        $refCol = trim($m[2]);
+        $refCol = trim($refCol, ' "');
+        // Normalize identifier, may be schema.table or just table
+        $targetIdent = trim($targetIdent, ' "');
+        $refSchema = $defaultSchema;
+        $refTable = $targetIdent;
+        if (str_contains($targetIdent, '.')) {
+            $parts = explode('.', $targetIdent, 2);
+            $refSchema = trim($parts[0], ' "');
+            $refTable = trim($parts[1], ' "');
+        }
+        return [
+            'ref_schema' => $refSchema,
+            'ref_table' => $refTable,
+            'ref_col' => $refCol,
+        ];
+    }
+
+    /**
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    private function fetchRelatedSingle(string $schema, string $table, string $column, mixed $value, ?array $selection, array $args = [], int $depth = 0): ?array
+    {
+        if ($value === null) {
+            return null;
+        }
+        if ($depth > 5) {
+            return null;
+        }
+
+        // Schema can be overridden via arguments
+        $schema = $args['schema'] ?? $schema;
+
+        // Selection field names -> physical column names (mapRows re-keys the output back).
+        $selection = $this->selectionToPhysical($selection, $schema, $table);
+
+        $t = new TableModel(table: $schema . '.' . $table, lookupForeignTables: false, connection: $this->connection);
+        $metaCols = array_keys($t->metaData ?? []);
+        if (empty($metaCols)) {
+            throw new GraphQLException('Unable to read table metadata', 500);
+        }
+
+        [$selColumns, $nested] = $this->partitionSelection($selection, $metaCols);
+
+        $columns = !empty($selColumns) ? $selColumns : $metaCols;
+
+        // If nested deeper, include required local FK columns of the referenced table
+        $autoFkCols = [];
+        $fkMap = [];
+        if (!empty($nested)) {
+            $fkMap = $this->buildForeignMap($schema, $table);
+            foreach ($nested as $alias => $v) {
+                $relName = $v['name'];
+                if (!isset($fkMap[$relName])) {
+                    throw new GraphQLException("Unknown nested relation '$relName' on {$schema}.{$table}", 400);
+                }
+                $localCol = $fkMap[$relName]['local_col'];
+                if (!in_array($localCol, $columns, true)) {
+                    $columns[] = $localCol;
+                    $autoFkCols[$localCol] = true;
+                }
+            }
+        }
+
+        // Build SQL
+        $colsSql = implode(', ', array_map(self::quoteIdent(...), array_unique($columns)));
+        $qualified = self::quoteIdent($schema) . '.' . self::quoteIdent($table);
+
+        $params = ['v' => $value];
+        $whereSql = '';
+        if (!empty($args['where']) && is_array($args['where'])) {
+            $extraWhere = $this->buildWhere($args['where'], $metaCols, $params);
+            if ($extraWhere !== '') {
+                $whereSql = ' AND (' . $extraWhere . ')';
+            }
+        }
+
+        $sql = 'SELECT ' . $colsSql . ' FROM ' . $qualified . ' WHERE ' . self::quoteIdent($column) . ' = :v' . $whereSql . ' LIMIT 1';
+
+        $query['q'] = $sql;
+        $query['params'] = $params;
+        $query['convert_types'] = true;
+        $query['format'] = 'json';
+        $query['id'] = uniqid();
+
+        $statement = new Statement(connection: $this->connection, convertReturning: true);
+        $res = $statement->run(user: $this->user, api: $this->api, query: $query, subuser: $this->subuser, userGroup: $this->userGroup);
+
+        $rows = $res['data'] ?? ($res['rows'] ?? $res);
+        $row = (is_array($rows) && isset($rows[0])) ? $rows[0] : null;
+        if (!is_array($row)) {
+            return null;
+        }
+
+        // Map columns to names
+        $mappedRow = [];
+        foreach ($selColumns as $alias => $name) {
+            $mappedRow[$name] = $row[$name] ?? null;
+        }
+
+        // Attach deeper nested
+        if (!empty($nested)) {
+            $fkMap = $this->buildForeignMap($schema, $table);
+            foreach ($nested as $alias => $v) {
+                $relName = $v['name'];
+                $snakeRelName = self::camelToSnake($relName);
+                if (!isset($fkMap[$snakeRelName])) {
+                    continue;
+                }
+                $subSel = $v['selection'];
+                $map = $fkMap[$snakeRelName];
+                $localVal = $row[$map['local_col']] ?? null;
+                $mappedRow[$relName] = $this->fetchRelatedSingle(
+                    schema: $map['ref_schema'],
+                    table: $map['ref_table'],
+                    column: $map['ref_col'],
+                    value: $localVal,
+                    selection: is_array($subSel) ? $subSel : null,
+                    args: $v['args'] ?? [],
+                    depth: $depth + 1
+                );
+            }
+        }
+
+        return $mappedRow;
+    }
+
+    /**
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    protected function resolveField(string $field, array $args, mixed $positional = null, ?array $selection = null): mixed
+    {
+        if ($this->opType === 'mutation') {
+            return $this->resolveMutation($field, $args, $selection);
+        }
+        return $this->resolveDynamicTable($field, $args, $positional, $selection);
+    }
+
+    /**
+     * Dynamic table resolver: supports both list and single-row queries.
+     * If an ID-like argument (id) is provided, it returns a single object.
+     * Otherwise, it returns a list based on args schema, where, limit, offset.
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     * @throws GC2Exception
+     */
+    private function resolveDynamicTable(string $tableField, array $args, mixed $positional, ?array $selection): mixed
+    {
+        $schema = $this->schema;
+
+        if (str_starts_with($tableField, 'get') && strlen($tableField) > 3 && ctype_upper($tableField[3])) {
+            $tableField = substr($tableField, 3);
+        }
+        $table = self::camelToSnake($tableField);
+
+        // Map sanitized GraphQL field names in the selection back to physical column names,
+        // so the SQL below (keyed by physical columns) works unchanged. mapRows re-keys output.
+        $selection = $this->selectionToPhysical($selection, $schema, $table);
+
+        // Setup table metadata and columns
+        $t = new TableModel(table: $schema . '.' . $table, lookupForeignTables: false, connection: $this->connection);
+        $metaCols = array_keys($t->metaData ?? []);
+        if (empty($metaCols)) {
+            throw new GraphQLException('Unable to read table metadata', 500);
+        }
+
+        // Determine if this is a single-row fetch by ID
+        $idVal = $positional;
+        if ($idVal === null) {
+            $idVal = $args['id'] ?? null;
+        }
+
+        $query['convert_types'] = true;
+        $query['format'] = 'json';
+
+        $statement = new Statement(connection: $this->connection, convertReturning: true);
+
+
+        if ($idVal !== null) {
+            if (!method_exists($t, 'hasPrimeryKey') || !$t->hasPrimeryKey($schema . '.' . $table)) {
+                throw new GraphQLException('Table has no primary key; cannot use ID query', 400);
+            }
+            $pk = $t->primaryKey['attname'] ?? null;
+            if (!$pk) {
+                throw new GraphQLException('Primary key not found', 400);
+            }
+
+            // Partition selection into columns and nested fields
+            [$selColumns, $nested] = $this->partitionSelection($selection, $metaCols);
+            $columns = array_values($selColumns);
+            if (!empty($columns)) {
+                foreach ($columns as $c) {
+                    if (!in_array($c, $metaCols, true)) {
+                        throw new GraphQLException("Unknown column '$c' on {$schema}.{$table}", 400);
+                    }
+                }
+            } else {
+                $columns = $metaCols;
+                foreach ($metaCols as $c) {
+                    $selColumns[$c] = $c;
+                }
+            }
+
+            // Include PK always to allow potential deeper joins
+            if (!in_array($pk, $columns, true)) {
+                $columns[] = $pk;
+            }
+
+            // Build FK map if nested requested and ensure local fk columns
+            $fkMap = [];
+            if (!empty($nested)) {
+                $fkMap = $this->buildForeignMap($schema, $table);
+                foreach ($nested as $alias => $v) {
+                    $relName = $v['name'];
+                    if (!isset($fkMap[$relName])) {
+                        throw new GraphQLException("Unknown nested relation '$relName' on {$schema}.{$table}", 400);
+                    }
+                    $localCol = $fkMap[$relName]['local_col'];
+                    if (!in_array($localCol, $columns, true)) {
+                        $columns[] = $localCol;
+                    }
+                }
+            }
+
+            $colsSqlParts = array_map(fn($c) => '"' . str_replace('"', '""', $c) . '"', array_unique($columns));
+            $selectList = implode(', ', $colsSqlParts);
+            $qualified = '"' . str_replace('"', '""', $schema) . '"."' . str_replace('"', '""', $table) . '"';
+
+            $params = ['pk' => $idVal];
+            $whereSql = '';
+            $where = $args['where'] ?? [];
+            if (is_array($where) && !empty($where)) {
+                $extraWhere = $this->buildWhere($where, $metaCols, $params);
+                if ($extraWhere !== '') {
+                    $whereSql = ' AND (' . $extraWhere . ')';
+                }
+            }
+
+            $sql = 'SELECT ' . $selectList . ' FROM ' . $qualified . ' WHERE ' . '"' . str_replace('"', '""', $pk) . '" = :pk' . $whereSql . ' LIMIT 1';
+
+            $query['q'] = $sql;
+            $query['params'] = $params;
+            $query['id'] = uniqid();
+
+            $res = $statement->run(user: $this->user, api: $this->api, query: $query, subuser: $this->subuser, userGroup: $this->userGroup);
+            if (isset($res['success']) && $res['success'] === false) {
+                throw new GraphQLException($res['message'] ?? 'Unknown SQL error', 400);
+            }
+            $rows = $res['data'] ?? ($res['rows'] ?? $res);
+            $rows = is_array($rows) ? $rows : [];
+
+            return $this->mapRows($rows, $selection, $schema, $table);
+        }
+
+        // --- List query logic ---
+        $qualified = '"' . str_replace('"', '""', $schema) . '"."' . str_replace('"', '""', $table) . '"';
+
+        // Partition selection into columns and nested fields
+        [$selColumns, $nested] = $this->partitionSelection($selection, $metaCols);
+
+        $columns = array_values($selColumns);
+        if (!empty($columns)) {
+            foreach ($columns as $c) {
+                if (!in_array($c, $metaCols, true)) {
+                    throw new GraphQLException("Unknown column '$c' on {$schema}.{$table}", 400);
+                }
+            }
+        } else {
+            $columns = $metaCols; // default to all when no explicit scalar selection
+            // If we default to all columns, we need to populate selColumns so they can be mapped later
+            foreach ($metaCols as $c) {
+                $selColumns[$c] = $c;
+            }
+        }
+
+        // Build FK map if nested requested
+        if (!empty($nested)) {
+            $fkMap = $this->buildForeignMap($schema, $table);
+            // Ensure local FK columns are present for each nested relation
+            foreach ($nested as $alias => $v) {
+                $relName = $v['name'];
+                if (!isset($fkMap[$relName])) {
+                    throw new GraphQLException("Unknown nested relation '$relName' on {$schema}.{$table}", 400);
+                }
+                $localCol = $fkMap[$relName]['local_col'];
+                if (!in_array($localCol, $columns, true)) {
+                    $columns[] = $localCol;
+                }
+            }
+        }
+
+        $colsSqlParts = array_map(fn($c) => '"' . str_replace('"', '""', $c) . '"', array_unique($columns));
+        $selectList = implode(', ', $colsSqlParts);
+
+        // WHERE clause
+        $params = [];
+        $where = $args['where'] ?? [];
+        if (!is_array($where)) {
+            $where = [];
+        }
+        $whereSql = $this->buildWhere($where, $metaCols, $params);
+        if ($whereSql !== '') {
+            $whereSql = ' WHERE ' . $whereSql;
+        }
+
+        $limit = isset($args['limit']) && is_numeric($args['limit']) ? (int)$args['limit'] : 100;
+        $offset = isset($args['offset']) && is_numeric($args['offset']) ? (int)$args['offset'] : null;
+
+        $sql = 'SELECT ' . $selectList . ' FROM ' . $qualified . $whereSql . ' LIMIT ' . max(0, $limit);
+        if ($offset !== null) {
+            $sql .= ' OFFSET ' . max(0, $offset);
+        }
+
+
+        $query['q'] = $sql;
+        $query['params'] = $params;
+        $query['id'] = uniqid();
+
+        $res = $statement->run(user: $this->user, api: $this->api, query: $query, subuser: $this->subuser, userGroup: $this->userGroup);
+        if (isset($res['success']) && $res['success'] === false) {
+            throw new GraphQLException($res['message'] ?? 'Unknown SQL error', 400);
+        }
+        $rows = $res['data'] ?? ($res['rows'] ?? $res);
+        $rows = is_array($rows) ? $rows : [];
+
+        return $this->mapRows($rows, $selection, $schema, $table);
+    }
+
+
+    /**
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    private function resolveMutation(string $field, array $args, ?array $selection): mixed
+    {
+        if (str_starts_with($field, 'insert')) {
+            $table = self::camelToSnake(substr($field, 6));
+            if ($table === '') {
+                throw new GraphQLException("Mutation '$field' must be followed by a table name", 400);
+            }
+            return $this->handleInsert($table, $args, $selection);
+        }
+        if (str_starts_with($field, 'update')) {
+            $table = self::camelToSnake(substr($field, 6));
+            if ($table === '') {
+                throw new GraphQLException("Mutation '$field' must be followed by a table name", 400);
+            }
+            return $this->handleUpdate($table, $args, $selection);
+        }
+        if (str_starts_with($field, 'delete')) {
+            $table = self::camelToSnake(substr($field, 6));
+            if ($table === '') {
+                throw new GraphQLException("Mutation '$field' must be followed by a table name", 400);
+            }
+            return $this->handleDelete($table, $args, $selection);
+        }
+        throw new GraphQLException("Unknown mutation '$field'", 400);
+    }
+
+    /**
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    private function handleInsert(string $table, array $args, ?array $selection): mixed
+    {
+        $schema = $this->schema;
+        $selection = $this->selectionToPhysical($selection, $schema, $table);
+        $objects = $args['objects'] ?? [];
+        $isSingle = false;
+        if (isset($args['object'])) {
+            $objects = [$args['object']];
+            $isSingle = true;
+        }
+        if (isset($args['data'])) {
+            $objects = [$args['data']];
+            $isSingle = false; // We want to return a list even for single insert now
+        }
+
+        if (empty($objects)) {
+            throw new GraphQLException("No objects to insert", 400);
+        }
+
+        $columns = array_keys($objects[0]);
+        $quotedTable = self::quoteIdent($schema) . '.' . self::quoteIdent($table);
+        $quotedCols = array_map(self::quoteIdent(...), $columns);
+
+        $sql = "INSERT INTO $quotedTable (" . implode(', ', $quotedCols) . ") VALUES ";
+
+        $params = [];
+        $valuesRows = [];
+        foreach ($objects as $rowIndex => $obj) {
+            $rowValues = [];
+            foreach ($columns as $col) {
+                $p = "p{$rowIndex}_{$col}";
+                $params[$p] = $obj[$col] ?? null;
+                $rowValues[] = ":$p";
+            }
+            $valuesRows[] = "(" . implode(', ', $rowValues) . ")";
+        }
+        $sql .= implode(', ', $valuesRows) . " RETURNING *";
+
+        $query = $this->buildQueryArray($sql, $params, $schema, $table);
+
+        $statement = new Statement(connection: $this->connection, convertReturning: true);
+        $res = $statement->run(user: $this->user, api: $this->api, query: $query, subuser: $this->subuser, userGroup: $this->userGroup);
+
+        return $this->mapMutationResult($res['returning']['data'] ?? [], $selection, $isSingle, $schema, $table);
+    }
+
+    /**
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    private function handleUpdate(string $table, array $args, ?array $selection): array
+    {
+        $schema = $this->schema;
+        $selection = $this->selectionToPhysical($selection, $schema, $table);
+        $where = $args['where'] ?? [];
+        $set = $args['data'] ?? [];
+        $idVal = $args['id'] ?? null;
+        $pkWhere = null;
+
+        if (empty($set)) {
+            throw new GraphQLException("No columns to update", 400);
+        }
+
+        $t = new TableModel(table: $schema . '.' . $table, lookupForeignTables: false, connection: $this->connection);
+        $metaCols = array_keys($t->metaData ?? []);
+
+        $params = [];
+
+        if ($idVal !== null) {
+            if (!$t->hasPrimeryKey($schema . '.' . $table)) {
+                throw new GraphQLException('Table has no primary key; cannot use ID query', 400);
+            }
+            $pk = $t->primaryKey['attname'] ?? null;
+            if (!$pk) {
+                throw new GraphQLException('Primary key not found', 400);
+            }
+            $params['pk'] = $idVal;
+            $pkWhere = $pk . ' = :pk';
+        }
+
+        $setClauses = [];
+        foreach ($set as $col => $val) {
+            $p = 's_' . $col;
+            $setClauses[] = self::quoteIdent($col) . " = :$p";
+            $params[$p] = $val;
+        }
+
+        $whereSql = $this->buildWhere($where, $metaCols, $params);
+        if ($whereSql === '' && $idVal === null) {
+            throw new GraphQLException("Update requires 'id ' or 'where' argument", 400);
+        }
+
+        $quotedTable = self::quoteIdent($schema) . '.' . self::quoteIdent($table);
+        $sql = "UPDATE $quotedTable SET " . implode(', ', $setClauses) . " WHERE " . ($pkWhere ?? $whereSql) . " RETURNING *";
+
+        $query = $this->buildQueryArray($sql, $params, $schema, $table);
+
+        $statement = new Statement(connection: $this->connection, convertReturning: true);
+        $res = $statement->run(user: $this->user, api: $this->api, query: $query, subuser: $this->subuser, userGroup: $this->userGroup);
+
+        return $this->mapMutationResult($res['returning']['data'] ?? [], $selection, false, $schema, $table);
+    }
+
+    /**
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    private function handleDelete(string $table, array $args, ?array $selection): array
+    {
+        $schema = $this->schema;
+        $selection = $this->selectionToPhysical($selection, $schema, $table);
+        $where = $args['where'] ?? [];
+        $idVal = $args['id'] ?? null;
+        $pkWhere = null;
+
+        $t = new TableModel(table: $schema . '.' . $table, lookupForeignTables: false, connection: $this->connection);
+        $params = [];
+
+        if ($idVal !== null) {
+            if (!$t->hasPrimeryKey($schema . '.' . $table)) {
+                throw new GraphQLException('Table has no primary key; cannot use ID query', 400);
+            }
+            $pk = $t->primaryKey['attname'] ?? null;
+            if (!$pk) {
+                throw new GraphQLException('Primary key not found', 400);
+            }
+            $params['pk'] = $idVal;
+            $pkWhere = $pk . ' = :pk';
+        }
+
+        $metaCols = array_keys($t->metaData ?? []);
+        $whereSql = $this->buildWhere($where, $metaCols, $params);
+
+        if ($whereSql === '' && $idVal === null) {
+            throw new GraphQLException("Delete requires 'id ' or 'where' argument", 400);
+        }
+
+        $quotedTable = self::quoteIdent($schema) . '.' . self::quoteIdent($table);
+        $sql = "DELETE FROM $quotedTable WHERE " . ($pkWhere ?? $whereSql) . " RETURNING *";
+
+        $query = $this->buildQueryArray($sql, $params, $schema, $table);
+
+        $statement = new Statement(connection: $this->connection, convertReturning: true);
+        $res = $statement->run(user: $this->user, api: $this->api, query: $query, subuser: $this->subuser, userGroup: $this->userGroup);
+        return $this->mapMutationResult($res['returning']['data'] ?? [], $selection, false, $schema, $table);
+    }
+
+    private function executeQuery(string $sql, array $params): array
+    {
+        $query = [
+            'q' => $sql,
+            'params' => $params,
+            'format' => 'json',
+            'convert_types' => true,
+            'id' => uniqid()
+        ];
+        $statement = new Statement(connection: $this->connection, convertReturning: true);
+        $res = $statement->run(user: $this->user, api: $this->api, query: $query, subuser: $this->subuser, userGroup: $this->userGroup);
+        return $res['data'] ?? ($res['rows'] ?? $res);
+    }
+
+    /**
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    private function mapMutationResult(array $rows, ?array $selection, bool $isSingle, string $schema, string $table): mixed
+    {
+        return $this->mapRows($rows, $selection, $schema, $table);
+    }
+
+    /**
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    private function mapRows(array $rows, ?array $selection, string $schema, string $table): array
+    {
+        $metaCols = !empty($rows) ? array_keys($rows[0]) : [];
+        [$selColumns, $nested] = $this->partitionSelection($selection, $metaCols);
+        if (empty($selColumns) && empty($nested) && !empty($rows)) {
+            $allCols = array_keys($rows[0]);
+            $selColumns = array_combine($allCols, $allCols);
+        }
+
+        $fkMap = [];
+        if (!empty($nested)) {
+            $fkMap = $this->buildForeignMap($schema, $table);
+        }
+
+        // Rows are keyed by physical column names; re-key scalars back to the sanitized
+        // GraphQL field names so the (sanitized) output type resolves them.
+        $toField = $this->fieldMap($schema, $table)['toField'];
+
+        foreach ($rows as &$row) {
+            $mappedRow = [];
+            foreach ($selColumns as $name) {
+                $mappedRow[$toField[$name] ?? $name] = $row[$name] ?? null;
+            }
+            if (!empty($nested)) {
+                foreach ($nested as $alias => $v) {
+                    $relName = $v['name'];
+                    $snakeRelName = self::camelToSnake($relName);
+                    if (!isset($fkMap[$snakeRelName])) {
+                        throw new GraphQLException("Unknown nested relation '$relName' on {$schema}.{$table}", 400);
+                    }
+                    $subSel = $v['selection'];
+                    $map = $fkMap[$snakeRelName];
+                    $localVal = $row[$map['local_col']] ?? null;
+                    $mappedRow[$relName] = $this->fetchRelatedSingle(
+                        schema: $map['ref_schema'],
+                        table: $map['ref_table'],
+                        column: $map['ref_col'],
+                        value: $localVal,
+                        selection: is_array($subSel) ? $subSel : null,
+                        args: $v['args'] ?? []
+                    );
+                }
+            }
+            $row = $mappedRow;
+        }
+        return $rows;
+    }
+
+    /**
+     * Convert AST value into PHP value, using provided variables.
+     */
+    private function valueFromAst(ValueNode $node, array $variables): mixed
+    {
+        if ($node instanceof VariableNode) {
+            $name = $node->name->value;
+            return $variables[$name] ?? null;
+        }
+        if ($node instanceof StringValueNode) {
+            return $node->value;
+        }
+        if ($node instanceof IntValueNode) {
+            return (int)$node->value;
+        }
+        if ($node instanceof FloatValueNode) {
+            return (float)$node->value;
+        }
+        if ($node instanceof BooleanValueNode) {
+            return (bool)$node->value;
+        }
+        if ($node instanceof NullValueNode) {
+            return null;
+        }
+        if ($node instanceof ListValueNode) {
+            $arr = [];
+            foreach ($node->values as $v) {
+                $arr[] = $this->valueFromAst($v, $variables);
+            }
+            return $arr;
+        }
+        if ($node instanceof ObjectValueNode) {
+            $obj = [];
+            foreach ($node->fields as $f) {
+                $obj[$f->name->value] = $this->valueFromAst($f->value, $variables);
+            }
+            return $obj;
+        }
+        return null;
+    }
+
+    /**
+     * Non-static wrapper for buildWhereClause (parameterized mode for SQL queries).
+     * @throws GraphQLException
+     */
+    private function buildWhere(array $where, array $metaCols, array &$params, string $conjunction = 'AND'): string
+    {
+        return self::buildWhereClause($where, $metaCols, $params, $conjunction);
+    }
+
+    /**
+     * Build a recursive WHERE clause from a JSON-style where array.
+     *
+     * Two modes controlled by $params:
+     *  - Parameterized (for SQL): pass $metaCols and $params array → produces `:p0` placeholders,
+     *    quotes column names, validates columns against $metaCols.
+     *  - Literal (for ShapeFilter): pass $metaCols = null and $params = null → produces inline
+     *    literal values, bare column names, no column validation.
+     *
+     * @throws GraphQLException
+     */
+    private static function buildWhereClause(array $where, ?array $metaCols, ?array &$params, string $conjunction = 'AND'): string
+    {
+        $literal = ($params === null);
+        $opMap = [
+            'eq' => '=', 'gt' => '>', 'lt' => '<',
+            'gte' => '>=', 'lte' => '<=', 'neq' => '!=',
+            'like' => 'LIKE', 'ilike' => 'ILIKE',
+        ];
+
+        $clauses = [];
+        foreach ($where as $key => $value) {
+            $upper = strtoupper($key);
+
+            // Logical operators: AND, OR, NOT
+            if ($upper === 'AND' || $upper === 'OR') {
+                if (is_array($value)) {
+                    $subClauses = [];
+                    foreach ($value as $v) {
+                        if (is_array($v)) {
+                            $sub = self::buildWhereClause($v, $metaCols, $params);
+                            if ($sub !== '') {
+                                $subClauses[] = $sub;
+                            }
+                        }
+                    }
+                    if (!empty($subClauses)) {
+                        $clauses[] = '(' . implode(" $upper ", $subClauses) . ')';
+                    }
+                }
+                continue;
+            }
+            if ($upper === 'NOT') {
+                if (is_array($value)) {
+                    $sub = self::buildWhereClause($value, $metaCols, $params);
+                    if ($sub !== '') {
+                        $clauses[] = 'NOT (' . $sub . ')';
+                    }
+                }
+                continue;
+            }
+
+            // Column validation (only in parameterized mode)
+            if ($metaCols !== null && !in_array($key, $metaCols, true)) {
+                throw new GraphQLException("Unknown column '$key'", 400);
+            }
+
+            $quotedCol = $literal ? $key : self::quoteIdent($key);
+
+            if (is_array($value) && !empty($value) && self::isOperatorArray($value)) {
+                foreach ($value as $op => $opVal) {
+                    $opLower = strtolower($op);
+
+                    if ($opLower === 'in') {
+                        if (!is_array($opVal)) {
+                            throw new GraphQLException("Operator 'in' requires an array value", 400);
+                        }
+                        if ($literal) {
+                            $items = array_map(fn($v) => self::filterLiteral($v), $opVal);
+                            $clauses[] = "$quotedCol IN (" . implode(', ', $items) . ")";
+                        } elseif (empty($opVal)) {
+                            $clauses[] = '1=0';
+                        } else {
+                            $p = 'p' . count($params);
+                            $inParams = [];
+                            foreach ($opVal as $i => $v) {
+                                $ip = $p . '_' . $i;
+                                $inParams[] = ":$ip";
+                                $params[$ip] = $v;
+                            }
+                            $clauses[] = "$quotedCol IN (" . implode(', ', $inParams) . ")";
+                        }
+                    } elseif (isset($opMap[$opLower])) {
+                        $sqlOp = $opMap[$opLower];
+                        if ($literal) {
+                            $clauses[] = "$quotedCol $sqlOp " . self::filterLiteral($opVal);
+                        } else {
+                            $p = 'p' . count($params);
+                            $clauses[] = "$quotedCol $sqlOp :$p";
+                            $params[$p] = $opVal;
+                        }
+                    } else {
+                        throw new GraphQLException("Unknown operator '$op' for column '$key'", 400);
+                    }
+                }
+            } else {
+                // Simple equality
+                if ($literal) {
+                    $clauses[] = "$quotedCol = " . self::filterLiteral($value);
+                } else {
+                    $p = 'p' . count($params);
+                    $clauses[] = "$quotedCol = :$p";
+                    $params[$p] = $value;
+                }
+            }
+        }
+
+        return !empty($clauses) ? implode(" $conjunction ", $clauses) : '';
+    }
+
+    private static function isOperatorArray(array $arr): bool
+    {
+        $operators = ['eq', 'gt', 'lt', 'gte', 'lte', 'neq', 'in', 'like', 'ilike'];
+        return array_any($arr, fn($v, $k) => is_string($k) && in_array(strtolower($k), $operators, true));
+    }
+
+    /**
+     * Build a selection tree map from AST FieldNode similar to previous parser output.
+     * Returns [fieldName => ['name' => originalName, 'args' => [...], 'selection' => true|subtree]]
+     */
+    private function selectionTreeFromFieldNode(FieldNode $field, array $variables): array
+    {
+        $tree = [];
+        $selSet = $field->selectionSet?->selections ?? [];
+        foreach ($selSet as $sel) {
+            if ($sel instanceof FieldNode) {
+                $name = $sel->name->value;
+                $alias = $sel->alias?->value ?? $name;
+
+                $args = [];
+                foreach ($sel->arguments ?? [] as $arg) {
+                    $args[$arg->name->value] = $this->valueFromAst($arg->value, $variables);
+                }
+
+                $child = $this->selectionTreeFromFieldNode($sel, $variables);
+                $tree[$alias] = [
+                    'name' => $name,
+                    'args' => $args,
+                    'selection' => empty($child) ? true : $child
+                ];
+            }
+        }
+        return $tree;
+    }
+
+    /**
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    private function getTypeHints(string $schema, string $table, array $params): array
+    {
+        $meta = $this->api->getMetaData(table: $schema . '.' . $table, restriction: false, getEnums: false, lookupForeignTables: false);
+        $arr = [];
+        foreach ($params as $p => $v) {
+            $arr2 = explode('_', $p);
+            array_shift($arr2);
+            $normalizedCol = implode('_', $arr2);
+            $arr[$p] = $meta[$normalizedCol]['type'];
+        }
+        return $arr;
+    }
+
+    /**
+     * @throws GraphQLException
+     * @throws PhpfastcacheInvalidArgumentException
+     */
+    private function buildQueryArray(string $sql, array $params, string $schema, string $table): array
+    {
+        return [
+            'q' => $sql,
+            'params' => $params,
+            'format' => 'json',
+            'convert_types' => true,
+            'id' => uniqid(),
+            'type_hints' => $this->getTypeHints($schema, $table, $params)
+        ];
+    }
+
+    /**
+     * Sanitizes a string for use in GraphQL descriptions.
+     * Removes control characters that are invalid in GraphQL strings.
+     * Allowed: \t (0x09), \n (0x0A), \r (0x0D), and \u0020-\uFFFF.
+     */
+    private static function sanitizeDescription(?string $description): ?string
+    {
+        if ($description === null) {
+            return null;
+        }
+        // Remove control characters (0x00-0x1F) except \t, \n, \r
+        return preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F]/', '', $description);
+    }
+}

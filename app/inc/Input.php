@@ -1,26 +1,36 @@
 <?php
 /**
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2023 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
- *  
+ *
  */
 
 namespace app\inc;
 
+
+/**
+ * Class Input
+ * @package app\inc
+ */
 class Input
 {
     /**
-     * @var
+     * @var array<string>
      */
-    static $params;
-    const TEXT_PLAIN = "text/plain";
+    static ?array $params = null;
+    static ?string $body = null;
+    const string TEXT_PLAIN = "text/plain";
+    const string APPLICATION_JSON = "application/json";
+    const string APPLICATION_X_WWW_FORM_URLENCODED = "application/x-www-form-urlencoded";
+    const string MULTIPART_FORM_DATA = "multipart/form-data";
 
     /**
      *
-     * @param array $arr
+     * @param array<string> $arr
+     * DEPRECATED
      */
-    public static function setParams(array $arr)
+    public static function setParams(?array $arr): void
     {
         self::$params = $arr;
     }
@@ -31,24 +41,36 @@ class Input
     public static function getPath(): GetPart
     {
         $request = explode("/", strtok($_SERVER["REQUEST_URI"], '?'));
-        $obj = new GetPart($request);
-        return $obj;
+        return new GetPart($request);
     }
 
     /**
-     * @return string
+     * @return string|null
      */
-    public static function getMethod(): string
+    public static function getMethod(): ?string
     {
-        return strtolower($_SERVER['REQUEST_METHOD']);
+        return isset($_SERVER['REQUEST_METHOD']) ? strtolower($_SERVER['REQUEST_METHOD']) : null;
+    }
+
+    public static function getAccessControlRequestMethod(): ?string
+    {
+        return $_SERVER['HTTP_ACCESS_CONTROL_REQUEST_METHOD'] ?? null;
     }
 
     /**
-     * @return string
+     * @return string|null
      */
-    public static function getContentType(): string
+    public static function getAccept(): ?string
     {
-        return $_SERVER["CONTENT_TYPE"];
+        return $_SERVER['HTTP_ACCEPT'] ?? null;
+    }
+
+    /**
+     * @return string|null
+     */
+    public static function getContentType(): ?string
+    {
+        return $_SERVER["CONTENT_TYPE"] ?? null;
     }
 
     /**
@@ -60,61 +82,125 @@ class Input
     }
 
     /**
-     * @return string
+     * @return string|null
      */
-    public static function getApiKey()
+    public static function getApiKey(): ?string
     {
-        return $_SERVER['HTTP_GC2_API_KEY'];
+        return $_SERVER['HTTP_GC2_API_KEY'] ?? null;
     }
 
     /**
-     * @return string
+     * @return bool
      */
-    public static function getBody(): string
+    public static function getDryRun(): bool
     {
-        return file_get_contents('php://input');
+        return $_SERVER['HTTP_X_DRY_RUN'] ?? false;
+    }
+
+    /**
+     * @return string|null
+     */
+    public static function getJwtToken(): ?string
+    {
+        if (isset($_SERVER["HTTP_AUTHORIZATION"])) {
+            $split = explode(" ", $_SERVER["HTTP_AUTHORIZATION"], 2);
+            $type = $split[0] ?? null;
+            $data = $split[1] ?? null;
+            if (strcasecmp($type, "Bearer") == 0) {
+                return $data;
+            } else {
+                return null;
+            }
+        } else {
+            return null;
+        }
+    }
+
+    /**
+     * @param bool $decode
+     * @return string|null
+     */
+    public static function getBody(bool $decode = false): ?string
+    {
+        $content = file_get_contents('php://input');
+        if (empty($content)) {
+            return null;
+        }
+        // Hack to support + in URL encoded data
+        if (str_contains($content, '%2B')) {
+            $content = str_replace('%2B', '+', $content);
+        }
+        if ($decode) {
+            return urldecode($content);
+        } else {
+            return $content;
+        }
+    }
+
+    /**
+     * @return array<string>
+     */
+    public static function getCookies(): array
+    {
+        return $_COOKIE;
+    }
+
+    /**
+     * @return string|null
+     */
+    public static function getAuthUser(): ?string
+    {
+        $input = $_SERVER['PHP_AUTH_USER'] ?? null;
+        if (!$input) return null;
+        // Check for deprecated form: subuser@database
+        [$user, $db] = Util::extractUserFromSubUserString($input);
+        return $user ?? $db;
+    }
+
+    /**
+     * @return string|null
+     */
+    public static function getAuthPw(): ?string
+    {
+        return $_SERVER['PHP_AUTH_PW'];
     }
 
     /**
      * @param string|null $key
      * @param bool $raw
-     * @return array|mixed|string
+     * @return mixed
      */
-    public static function get(string $key = null, bool $raw = false)
+    public static function get(?string $key = null, bool $raw = false): mixed
     {
 
         if (isset(self::$params)) {
 
             if (isset($key)) {
-                return self::$params[$key];
+                return self::$params[$key] ?? null;
             } else {
                 return self::$params;
             }
-
         }
 
-        $query = "";
+        $query = [];
 
         switch (static::getMethod()) {
             case "get":
                 $query = $_GET;
                 break;
-            case "post":
-                $query = static::parseQueryString(file_get_contents('php://input'), $raw);
-                break;
             case "put":
-                $query = static::parseQueryString(file_get_contents('php://input'), $raw);
-                break;
             case "delete":
+            case "post":
+            case "patch":
                 $query = static::parseQueryString(file_get_contents('php://input'), $raw);
                 break;
         }
 
-        if (!reset($query) && $key == null)
+        if (!reset($query) && $key == null && sizeof($query) > 0)
             return str_replace("__gc2_plus__", "+", key($query));
         else {
             if ($key != null)
-                return $query[$key];
+                return $query[$key] ?? null;
             else
                 return $query;
         }
@@ -126,7 +212,7 @@ class Input
      * @param bool $raw
      * @return array
      */
-    static function parseQueryString(string $str, bool $raw = false): array
+    private static function parseQueryString(string $str, bool $raw = false): array
     {
         $op = [];
         $str = str_replace("+", "__gc2_plus__", $str);
@@ -135,47 +221,10 @@ class Input
         }
         $pairs = explode("&", $str);
         foreach ($pairs as $pair) {
-            list($k, $v) = array_map("urldecode", explode("=", $pair));
+            list($k, $v) = array_pad(array_map("urldecode", explode("=", $pair)), 2, null);
             $op[$k] = $v;
         }
         return $op;
     }
 }
 
-/**
- * Class GetPart
- * @package app\inc
- */
-class GetPart
-{
-    /**
-     * @var array
-     */
-    private $parts;
-
-    /**
-     * GetPart constructor.
-     * @param array $request
-     */
-    function __construct(array $request)
-    {
-        $this->parts = $request;
-    }
-
-    /**
-     * @param string $e
-     * @return string|null
-     */
-    function part(string $e)
-    {
-        return $this->parts[$e];
-    }
-
-    /**
-     * @return array
-     */
-    function parts():array
-    {
-        return $this->parts;
-    }
-}

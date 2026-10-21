@@ -1,141 +1,72 @@
 <?php
 /**
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2026 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
  *  
  */
 
 namespace app\controllers;
 
-use \app\inc\Response;
-use \app\inc\Input;
-use \app\conf\Connection;
-use \app\conf\App;
+use app\exceptions\GC2Exception;
+use app\inc\Controller;
+use app\inc\Input;
+use app\conf\Connection;
+use app\conf\App;
+use app\models\Database;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
+use Phpfastcache\Exceptions\PhpfastcacheLogicException;
+use Psr\Cache\InvalidArgumentException;
 
-class Tilecache extends \app\inc\Controller
+class Tilecache extends Controller
 {
-    private $db;
-    private $host;
-    private $subUser;
-    private $type;
-
     function __construct()
     {
         parent::__construct();
-
-        $this->db = \app\inc\Input::getPath()->part(2);
-        $this->host = "http://127.0.0.1";
-        $dbSplit = explode("@", $this->db);
-        if (sizeof($dbSplit) == 2) {
-            $this->subUser = $dbSplit[0];
-            $this->db = $dbSplit[1];
-        } else {
-            $this->subUser = null;
-        }
     }
 
-    public function fetch()
+    /**
+     * @return array
+     * @throws PhpfastcacheInvalidArgumentException
+     * @throws PhpfastcacheLogicException
+     * @throws InvalidArgumentException
+     * @throws GC2Exception
+     */
+    public function delete_index(): array
     {
-        $uriParts = array();
-        $parts = explode("/", $_SERVER['REQUEST_URI']);
-        for ($i = 0; $i < sizeof($parts); $i++) {
-            if ($i == 2) {
-                $b = explode("@", $parts[$i]);
-                if (sizeof($b) > 1) {
-                    $parts[$i] = $b[1];
-                }
-            }
-            $uriParts[] = $parts[$i];
-        }
-        $uri = implode("/", $uriParts);
-        $layer = null;
-        $url = null;
-        switch (explode("?", $parts[3])[0]) {
-            case "tms";
-                $layer = explode("@", $parts[5])[0];
-                $url = $this->host . "/cgi/tilecache.py" . "/" . $uriParts[4] . "/" . $uriParts[5] . "/" . $uriParts[6] . "/" . $uriParts[7] . "/" . $uriParts[8] . "?cfg=" . $this->db;
-                break;
-            case "wms";
-                $get = array_change_key_case($_GET, CASE_UPPER);
-                if (strtolower($get["REQUEST"]) == "getcapabilities" ||
-                    strtolower($get["REQUEST"]) == "getlegendgraphic" ||
-                    strtolower($get["REQUEST"]) == "getfeatureinfo" ||
-                    strtolower($get["REQUEST"]) == "describefeaturetype" ||
-                    isset($get["FORMAT_OPTIONS"]) == true
-                ) {
-                    $url = $this->host . "/ows/" . $this->db . "/" . $parts[4] . "?" . explode("?", $uri)[1];
-                    $url = rtrim($url, '?');
-                } else {
-                    $layer = $get["LAYERS"];
-                    $url = $this->host . "/cgi/tilecache.py" . "?" . explode("?", $uri)[1] . "&cfg=" . $this->db;
-                }
-                break;
-        }
-        //die(print_r($layer, true));
-        $url = $url ?: $this->host . $uri;
-
-        header("X-Powered-By: GC2 TileCache");
-
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-        curl_setopt($ch, CURLOPT_HEADERFUNCTION, function ($curl, $header_line) {
-            $bits = explode(":", $header_line);
-            if ($bits[0] == "Content-Type") {
-                $this->type = trim($bits[1]);
-            }
-            // Send text/xml instead of application/vnd.ogc.se_xml
-            if ($bits[0] == "Content-Type" && trim($bits[1]) == "application/vnd.ogc.se_xml") {
-                header("Content-Type: text/xml");
-            } elseif ($bits[0] != "Content-Encoding" && trim($bits[1]) != "chunked") {
-                header($header_line);
-            }
-            return strlen($header_line);
-        });
-        $content = curl_exec($ch);
-        curl_close($ch);
-
-        // Check authentication level if image
-        if (explode("/", $this->type)[0] == "image") {
-            $this->basicHttpAuthLayer($layer, $this->db, $this->subUser);
-        }
-
-        // Return content
-        echo $content;
-        exit();
-    }
-
-    public function delete_index()
-    {
-        $layer = new \app\models\Layer();
-        $cache = $layer->getAll(Input::getPath()->part(4), true, false, true, false)["data"][0]["def"]->cache;
-
-        // Default
-        // =======
-        $cache = $cache ?: App::$param["mapCache"]["type"];
+        // In schema mode the route is .../tilecache/schema/<schema>, so part(4) is
+        // the literal word "schema" and the name is in part(5). Looking part(4) up
+        // as a layer — which this did — could only ever answer the install default,
+        // so a schema configured for another backend silently cleared nothing.
+        $target = Input::getPath()->part(4) === "schema"
+            ? (string)Input::getPath()->part(5)
+            : (string)Input::getPath()->part(4);
+        $cache = self::cacheBackendFor($target);
 
         $response = [];
         switch ($cache) {
             case "sqlite":
                 if (Input::getPath()->part(4) === "schema") {
-                    $response = $this->auth(null, array());
+                    $response = $this->isOwner();
                     if (!$response['success']) {
                         return $response;
                     }
-                    $searchStr = Input::getPath()->part(5) . ".%";
+                    $schema = Input::getPath()->part(5);
+                    $file = App::$param['path'] . "app/wms/mapcache/sqlite/" . Connection::$param["postgisdb"] . "/" . $schema . ".sqlite3";
+                    @unlink($file);
+                    $response['success'] = true;
+                    $response['message'] = "Tile cache for schema deleted";
+                    return $response;
                 } else {
                     $parts = explode(".", Input::getPath()->part(4));
                     $searchStr = $parts[0] . "." . $parts[1];
                     $response = $this->auth(Input::getPath()->part(4), array("all" => true, "write" => true));
-
                     if (!$response['success']) {
                         return $response;
                     }
                 }
                 if ($searchStr) {
-                    $res = self::deleteFromTileset($searchStr, Connection::$param["postgisdb"]);
+                    $res = self::unlikeSQLiteFile($searchStr);
                     if (!$res["success"]) {
                         $response['success'] = false;
                         $response['message'] = $res["message"];
@@ -152,7 +83,7 @@ class Tilecache extends \app\inc\Controller
 
             case "disk":
                 if (Input::getPath()->part(4) === "schema") {
-                    $response = $this->auth(null, array());
+                    $response = $this->isOwner();
                     if (!$response['success']) {
                         return $response;
                     }
@@ -177,12 +108,10 @@ class Tilecache extends \app\inc\Controller
                 break;
 
             case "bdb";
-
-
-                $dba = \dba_open(App::$param['path'] . "app/wms/mapcache/bdb/" . Connection::$param["postgisdb"] . "/" . "feature.polygon/bdb_feature.polygon.db", "c", "db4");
+                $dba = dba_open(App::$param['path'] . "app/wms/mapcache/bdb/" . Connection::$param["postgisdb"] . "/" . "feature.polygon/bdb_feature.polygon.db", "c", "db4");
 
                 $key = dba_firstkey($dba);
-                while ($key !== false && $key !== null) {
+                while ($key !== false) {
                     dba_delete($key, $dba);
                     $key = dba_nextkey($dba);
                 }
@@ -191,32 +120,79 @@ class Tilecache extends \app\inc\Controller
                 $response['success'] = true;
                 $response['message'] = "Tile cache deleted.";
                 break;
+
+            default:
+                // s3 and memcache have no delete here. Saying so is the point: this
+                // used to fall through and return an empty response, so the caller
+                // was told nothing at all while nothing was deleted.
+                $response['success'] = false;
+                $response['message'] = "Cannot clear a '$cache' tile cache from here.";
+                $response['code'] = '501';
+                break;
         }
-        return Response::json($response);
+        return $response;
     }
 
-    static function bust($layerName)
+    /**
+     * Which cache backend a tileset name lives in.
+     *
+     * A layer's tileset is decided by the layer's own def. A merged per-schema
+     * tileset — a bare schema name, or one whose only dot is the .mvt/.json
+     * suffix — is decided by settings.schema_settings. Anything unresolved falls
+     * back to the install default.
+     *
+     * Without the schema branch, clearing a schema tileset configured for disk or
+     * s3 would look in sqlite, delete nothing and report success.
+     */
+    static function cacheBackendFor(string $tilesetName, ?\app\inc\Connection $connection = null): string
     {
-        $layer = new \app\models\Layer();
-        $cache = isset($layer->getAll($layerName, true, false, true, false)["data"][0]["def"]->cache) ? $layer->getAll($layerName, true, false, true, false)["data"][0]["def"]->cache : null;
+        $default = !empty(App::$param["mapCache"]["type"]) ? App::$param["mapCache"]["type"] : 'sqlite';
 
-        // Default
-        // =======
-        $cache = $cache ?: App::$param["mapCache"]["type"];
+        // Strip the format suffix: a vector tileset is <name>.mvt / <name>.json,
+        // and the settings belong to <name>.
+        $base = preg_replace('/\.(mvt|json)$/', '', $tilesetName);
 
+        // A GC2 layer key is always schema.table, so a name with no dot cannot be
+        // a layer — it is a merged per-schema tileset, and asking the Layer model
+        // about it would be both pointless and, under the CLI, fatal.
+        if (!str_contains($base, '.')) {
+            $row = (new \app\models\SchemaSettings(connection: $connection))->get($base);
+            $def = $row && $row['def'] ? json_decode($row['def']) : null;
+            return !empty($def->cache) ? (string)$def->cache : $default;
+        }
+
+        $db = $connection ? $connection->database : Database::getDb();
+        $layer = $connection ? new \app\models\Layer(connection: $connection) : new \app\models\Layer();
+        $meta = $layer->getAll($db, true, $tilesetName, false, true);
+        return $meta["data"][0]["def"]->cache ?? $default;
+    }
+
+    /**
+     * @param string $layerName
+     * @return array
+     * @throws GC2Exception
+     * @throws PhpfastcacheInvalidArgumentException
+     * @throws PhpfastcacheLogicException
+     */
+    static function bust(string $layerName, ?\app\inc\Connection $connection = null): array
+    {
+        // Prefer an explicit connection (worker/FrankenPHP-safe) over the process
+        // -global "current database"; fall back to the global for legacy callers.
+        $db = $connection ? $connection->database : Database::getDb();
+        $cache = self::cacheBackendFor($layerName, $connection);
         $response = [];
-
         $res = null;
 
         switch ($cache) {
             case "sqlite":
-                $res = self::deleteFromTileset($layerName, Connection::$param["postgisdb"]);
+                $res = self::unlikeSQLiteFile($layerName, $connection);
                 break;
             case "disk":
-                $dir = App::$param['path'] . "app/wms/mapcache/disk/" . Connection::$param["postgisdb"] . "/" . $layerName;
-                $res = self::unlinkTiles($dir, $layerName);
+                $dir = App::$param['path'] . "app/wms/mapcache/disk/" . $db . "/" . $layerName;
+                $res = self::unlinkTiles($dir, $layerName, $connection);
                 break;
         }
+
         if (!$res["success"]) {
             $response['success'] = false;
             $response['message'] = $res["message"];
@@ -228,56 +204,54 @@ class Tilecache extends \app\inc\Controller
         return $response;
     }
 
-    private function deleteFromTileset($layerName)
+    /**
+     * @param string $layerName
+     * @return array
+     * @throws GC2Exception
+     * @throws PhpfastcacheLogicException
+     */
+    private static function unlikeSQLiteFile(string $layerName, ?\app\inc\Connection $connection = null): array
     {
-        $layer = new \app\models\Layer();
-        $meta = $layer->getAll($layerName, true, false, true, false);
-        if (isset($meta["data"][0]["def"]->lock) && $meta["data"][0]["def"]->lock == true) {
+        $db = $connection ? $connection->database : Database::getDb();
+        $layer = $connection ? new \app\models\Layer(connection: $connection) : new \app\models\Layer();
+        $meta = $layer->getAll($db, true, $layerName, false, true);
+        if (isset($meta["data"][0]["def"]->lock) && $meta["data"][0]["def"]->lock) {
             $response['success'] = false;
             $response['message'] = "The layer is locked in the tile cache. Unlock it in the Tile cache settings.";
             $response['code'] = '406';
             return $response;
         }
-
-        try {
-            $db = new \SQLite3(App::$param['path'] . "app/wms/mapcache/sqlite/" . Connection::$param['postgisdb'] . "/" . $layerName . ".sqlite3");
-        } catch (\Exception $exception) {
-            // sqlite3 throws an exception when it is unable to connect
-            $response['success'] = false;
-            $response['message'] = $exception->getMessage();
-            $response['code'] = '406';
-
-            return $response;
-        }
-
-        $result = $db->query("DELETE FROM tiles");
-        if (!$result) {
-            $response['success'] = false;
-            $response['message'] = $db->lastErrorMsg();
-            $response['code'] = '406';
-            return $response;
-        }
-        //$db->query("VACUUM");
+        $file1 = App::$param['path'] . "app/wms/mapcache/sqlite/" . $db . "/" . $layerName . ".sqlite3";
+        $file2 = App::$param['path'] . "app/wms/mapcache/sqlite/" . $db . "/" . $layerName . ".json.sqlite3";
+        @unlink($file1);
+        @unlink($file2);
         $response['success'] = true;
         return $response;
     }
 
-    private function unlinkTiles($dir, $layerName)
+    /**
+     * @param string $dir
+     * @param string $layerName
+     * @return array
+     * @throws GC2Exception
+     * @throws PhpfastcacheLogicException
+     */
+    private static function unlinkTiles(string $dir, string $layerName, ?\app\inc\Connection $connection = null): array
     {
-        $layer = new \app\models\Layer();
-        $meta = $layer->getAll($layerName, true, false, true, false);
-        if (isset($meta["data"][0]["def"]->lock) && $meta["data"][0]["def"]->lock == true) {
+        $db = $connection ? $connection->database : Database::getDb();
+        $layer = $connection ? new \app\models\Layer(connection: $connection) : new \app\models\Layer();
+        $meta = $layer->getAll($db, true, $layerName, false, true);
+        if (isset($meta["data"][0]["def"]->lock) && $meta["data"][0]["def"]->lock) {
             $response['success'] = false;
             $response['message'] = "The layer is locked in the tile cache. Unlock it in the Tile cache settings.";
             $response['code'] = '406';
             return $response;
         }
-
         if ($dir) {
-            exec("rm -R {$dir} 2> /dev/null");
-            if (strpos($dir, ".*") !== false) {
+            exec("rm -R $dir 2> /dev/null");
+            if (str_contains($dir, ".*")) {
                 $dir = str_replace(".*", "", $dir);
-                exec("rm -R {$dir} 2> /dev/null");
+                exec("rm -R $dir 2> /dev/null");
             }
             $response['success'] = true;
         } else {
@@ -285,7 +259,5 @@ class Tilecache extends \app\inc\Controller
         }
         return $response;
     }
-
 }
-
 

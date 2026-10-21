@@ -1,0 +1,195 @@
+networks:
+  internal:
+    external: false
+
+services:
+  mapserver:
+    image: mapcentia/mapserver:php8.4-trixie-2
+    privileged: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: mapserver
+      args:
+        - ECW_VERSION=3
+        - PHP_VERSION=8.4
+  gc2:
+    image: mapcentia/gc2:php8.4-trixie-2
+    privileged: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: cron
+      args:
+        - ECW_VERSION=3
+        - PHP_VERSION=8.4
+  dev:
+    image: dev
+    restart: unless-stopped
+    privileged: true
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: dev
+      args:
+        - ECW_VERSION=3
+        - PHP_VERSION=8.4
+    volumes:
+      - ../:/var/www/geocloud2
+    networks:
+      - default
+      - internal
+    ports:
+      - "8080:80"
+      - "8081:8080"
+    expose:
+      - 9000
+    env_file: conn.env
+    extra_hosts:
+      - host.docker.internal:host-gateway
+  gc2core_frankenphp:
+    image: centia-io:http
+    privileged: true
+    volumes:
+      - ../:/app/geocloud2
+    networks:
+      - default
+      - internal
+    ports:
+      - "8080:80"
+      - "8081:8080"
+    expose:
+      - 9000
+    env_file: conn.env
+    extra_hosts:
+      - host.docker.internal:host-gateway
+  event:
+    image: event
+    build:
+      context: ../app/event/.
+      dockerfile: Dockerfile
+    privileged: true
+    volumes:
+      - ../:/var/www/geocloud2
+    networks:
+      - default
+      - internal
+    ports:
+      - "8088:80"
+    expose:
+      - 9000
+    env_file: conn.env
+    extra_hosts:
+      - host.docker.internal:host-gateway
+  function-runner:
+    image: gc2-function-runner
+    build:
+      context: ../function-runner/.
+      dockerfile: Dockerfile
+    # For real gVisor isolation either run this service under the runsc runtime
+    # (uncomment `runtime: runsc` once the host's container runtime registers it)
+    # or set GC2_RUNNER_SANDBOX to a `docker run --runtime=runsc ...` launcher.
+    # runtime: runsc
+    environment:
+      GC2_RUNNER_ADDR: ":8090"
+      GC2_RUNNER_TOKEN: "change-me-shared-secret"
+      # GC2_RUNNER_SANDBOX: '["unshare","-rn","--"]'
+      GC2_RUNNER_POOL: "1"             # warm pools (skip cold start)
+      GC2_RUNNER_POOL_MAX: "8"         # max concurrent invocations
+    networks:
+      - default
+      - internal
+    expose:
+      - 8090
+  redis:
+    image: redis
+    restart: unless-stopped
+    networks:
+      - default
+      - internal
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+  postgres:
+    image: postgis/postgis:16-3.4
+    shm_size: 2gb
+    container_name: postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    env_file: conn.env
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - default
+      - internal
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.3.3
+    command:
+      - "start-dev"
+    networks:
+      - default
+      - internal
+    ports:
+      - "8083:8080"
+    environment:
+      - KC_BOOTSTRAP_ADMIN_USERNAME=admin
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=admin
+    volumes:
+      - keycloak:/opt/keycloak/data/
+
+#  limesurvey:
+#    image: docker.io/martialblog/limesurvey:6-fpm
+#    networks:
+#      - default
+#      - internal
+#    links:
+#      - postgres
+#    depends_on:
+#      - postgres
+#    environment:
+#      DB_TYPE: pgsql
+#      DB_PASSWORD: 1234
+#      DB_USERNAME: gc2
+#      DB_HOST: postgres
+#      DB_NAME: mydb
+#      DB_PORT: 5432
+#      ADMIN_USER: admin
+#      ADMIN_NAME: Admin
+#      ADMIN_PASSWORD: admin
+#      PUBLIC_URL: http://localhost:8082  # Example, Change this
+#      BASE_URL: http://localhost:8082 # Example, Change this
+#    volumes:
+#      - ./config.php:/var/www/html/application/config/config.php
+#      - lime:/var/www/html
+#
+#  lime-web:
+#    image: docker.io/nginx
+#    links:
+#      - limesurvey
+#    ports:
+#      - "8082:80"
+#    volumes:
+#      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+#      - lime:/var/www/html
+
+  elasticsearch:
+    image: elasticsearch:7.17.6
+    networks:
+      - default
+      - internal
+    ports:
+      - "9200:9200"
+    environment:
+      - "discovery.type=single-node"
+
+volumes:
+  lime:
+  pgdata:
+  keycloak:
+
+
+
+
+

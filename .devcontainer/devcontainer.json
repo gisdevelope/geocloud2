@@ -1,0 +1,40 @@
+{
+  "name": "geocloud2-dev",
+  "dockerComposeFile": [
+    "../docker/docker-compose.yml"
+  ],
+  "service": "gc2core",
+  "runServices": [
+    "postgres",
+    "redis"
+  ],
+  "workspaceFolder": "/var/www/geocloud2",
+  "overrideCommand": false,
+  "remoteUser": "root",
+  "shutdownAction": "stopCompose",
+  "postCreateCommand": "true",
+  "forwardPorts": [
+    80,
+    8080,
+    5432,
+    6379,
+    9000
+  ],
+  "features": {},
+  "customizations": {
+    "jetbrains": {
+      "settings": {
+        "com.intellij:app:BuiltInServerOptions.builtInServerPort": 51697,
+        "com.intellij:app:HttpConfigurable.use_proxy_pac": true
+      }
+    },
+    "vscode": {
+      "extensions": [
+        "ms-azuretools.vscode-docker",
+        "ms-vscode.vscode-typescript-next",
+        "xdebug.php-pack",
+        "esbenp.prettier-vscode"
+      ]
+    }
+  }
+}

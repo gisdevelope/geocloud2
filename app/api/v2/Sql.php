@@ -1,70 +1,53 @@
 <?php
 /**
- * Long description for file
- *
- * Long description for file (if any)...
- *
- * @category   API
- * @package    app\api\v2
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2024 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
- * @since      File available since Release 2013.1
  *
  */
 
 namespace app\api\v2;
 
-use \app\inc\Input;
-use \app\inc\Model;
+use app\conf\Connection;
+use app\exceptions\GC2Exception;
+use app\inc\Cache;
+use app\inc\Controller;
+use app\inc\Input;
+use app\inc\TableWalkerRelation;
+use app\inc\TableWalkerRule;
+use app\inc\UserFilter;
+use app\models\Geofence;
+use app\models\Rule;
+use app\models\Setting;
+use Psr\Cache\InvalidArgumentException;
+use sad_spirit\pg_builder\StatementFactory;
+use Phpfastcache\Exceptions\PhpfastcacheInvalidArgumentException;
+use Exception;
 
-include_once 'Cache_Lite/Lite.php';
+use app\inc\Util;
+use Throwable;
 
 /**
  * Class Sql
  * @package app\api\v1
  */
-class Sql extends \app\inc\Controller
+class Sql extends Controller
 {
-    /**
-     * @var array
-     */
-    public $response;
+    public array $response;
 
-    /**
-     * @var string
-     */
-    private $q;
+    private string|null $q;
 
-    /**
-     * @var string
-     */
-    private $apiKey;
+    private string $apiKey;
 
-    /**
-     * @var array
-     */
-    private $data;
+    private string $data;
 
-    /**
-     * @var string
-     */
-    private $subUser;
+    private ?string $subUser;
 
-    /**
-     * @var \app\models\Sql
-     */
-    private $api;
+    private \app\models\Sql $api;
 
-    /**
-     * @var array
-     */
-    private $usedRelations;
-
-    /**
-     *
-     */
     const USEDRELSKEY = "checked_relations";
+
+    private array $cacheInfo;
 
     function __construct()
     {
@@ -73,97 +56,124 @@ class Sql extends \app\inc\Controller
 
     /**
      * @return array
+     * @throws PhpfastcacheInvalidArgumentException
+     * @throws GC2Exception
+     * @throws InvalidArgumentException
+     * @throws Exception
      */
     public function get_index(): array
     {
         // Get the URI params from request
         // /{user}
         $r = func_get_arg(0);
-
-        $db = $r["user"];
-        $dbSplit = explode("@", $db);
-
-        if (sizeof($dbSplit) == 2) {
-            $this->subUser = $dbSplit[0];
-        } elseif (isset($_SESSION["subuser"])) {
-            $this->subUser = $_SESSION["subuser"];
-        } else {
-            $this->subUser = null;
+        try {
+            $this->api = func_get_arg(1);
+        } catch (Throwable) {
+            $srs = is_numeric(Input::get('srs')) ? Input::get('srs') : 3857;
+            $this->api = new \app\models\Sql();
+            $this->api->connect();
         }
+        [$this->subUser, $database] = Util::extractUserFromSubUserString($r["user"]);
+        $this->connection = new \app\inc\Connection(database: $database);
 
         // Check if body is JSON
         // Supports both GET and POST
         // ==========================
-        $json = json_decode(Input::getBody(), true);
+        $json = Input::getBody() ? json_decode(Input::getBody(), true) : null;
 
         // If JSON body when set GET input params
         // ======================================
         if ($json != null) {
 
+            $typeHints = $json["type_hints"] ?? Input::$params["type_hints"] ?? [];
+            $typeFormats = $json["type_formats"] ?? Input::$params["type_formats"] ?? [];
+            $srs = $json["srs"] ?? Input::$params["srs"] ?? $srs ?? null;
+            $outputFormat = !empty($json["format"]) ? $json["format"] : (!empty($json["output_format"]) ? $json["output_format"] : Input::$params["format"] ?? Input::$params["output_format"]);
+
             // Set input params from JSON
             // ==========================
             Input::setParams(
                 [
-                    "q" => $json["q"],
-                    "client_encoding" => $json["client_encoding"],
-                    "srs" => $json["srs"],
-                    "format" => $json["format"],
-                    "geoformat" => $json["geoformat"],
-                    "key" => $json["key"],
-                    "geojson" => $json["geojson"],
-                    "allstr" => $json["allstr"],
-                    "alias" => $json["alias"],
-                    "lifetime" => $json["lifetime"],
-                    "base64" => $json["base64"],
+                    "q" => !empty($json["q"]) ? $json["q"] : null,
+                    "client_encoding" => !empty($json["client_encoding"]) ? $json["client_encoding"] : null,
+                    "geoformat" => !empty($json["geoformat"]) ? $json["geoformat"] : (!empty($json["geo_format"]) ? $json["geo_format"] : null),
+                    "key" => !empty($json["key"]) ? $json["key"] : Input::$params["key"],
+                    "geojson" => !empty($json["geojson"]) ? $json["geojson"] : null,
+                    "allstr" => !empty($json["allstr"]) ? $json["allstr"] : null,
+                    "alias" => !empty($json["alias"]) ? $json["alias"] : null,
+                    "lifetime" => !empty($json["lifetime"]) ? $json["lifetime"] : null,
+                    "base64" => !empty($json["base64"]) ? $json["base64"] : null,
+                    "convert_types" => !empty($json["convert_types"]) ? $json["convert_types"] : Input::$params["convert_types"],
+                    "params" => !empty($json["params"]) ? $json["params"] : Input::$params["params"],
+                    "type_hints" => $typeHints,
+                    "type_formats" => $typeFormats,
+                    "format" => $outputFormat,
+                    "srs" => $srs,
                 ]
             );
-
         }
 
-        if (Input::get('base64')) {
-            $this->q = urldecode(base64_decode(urldecode(Input::get('q'))));
+        if (!empty($srs)) {
+            $this->api->setSRS($srs);
+        }
+
+        if (Input::get('base64') === true || Input::get('base64') === "true") {
+            $this->q = Util::base64urlDecode(Input::get("q"));
         } else {
-            $this->q = urldecode(Input::get('q'));
+            $qInput = Input::get('q');
+            if (!empty($qInput)) {
+                // Only urldecode if it looks URL-encoded (contains percent-escapes)
+                if (preg_match('/%[0-9a-fA-F]{2}/', $qInput)) {
+                    $this->q = urldecode($qInput);
+                } else {
+                    $this->q = $qInput;
+                }
+
+            } else {
+                $this->q = null;
+            }
         }
 
         if (!$this->q) {
-            $response['success'] = false;
-            $response['code'] = 403;
-            $response['message'] = "Query is missing (the 'q' parameter)";
-            return $response;
+            throw new GC2Exception("Query is missing (the 'q' parameter)", 403, null, "MISSING_PARAMETER");
         }
 
-        $settings_viewer = new \app\models\Setting();
-        $res = $settings_viewer->get();
-
-        // Check if success
-        // ================
-        if (!$res["success"]) {
-            return $res;
-        }
-
-        $srs = Input::get('srs') ?: "900913";
-        $this->api = new \app\models\Sql($srs);
-        $this->api->connect();
+        $settings = new Setting();
+        $res = $settings->get();
         $this->apiKey = $res['data']->api_key;
-
-        $this->response = $this->transaction($this->q, Input::get('client_encoding'));
+        $this->api->begin();
+        $serializedResponse = $this->transaction(Input::get('client_encoding'), Input::get('type_hints'), true, Input::get('type_formats'));
+        $this->api->commit();
 
         // Check if $this->data is set in SELECT section
-        if (!$this->data) {
-            $this->data = $this->response;
+        if (!isset($this->data)) {
+            $this->data = $serializedResponse;
         }
-        return unserialize($this->data);
+        $response = unserialize($this->data);
+        if (!empty($this->cacheInfo)) {
+            $response["cache"] = $this->cacheInfo;
+        }
+        if (!empty($response['returning'])) {
+            $response['returning'] = $response['returning']['data'];
+        }
+        return $response;
     }
 
     /**
      * @return array
+     * @throws PhpfastcacheInvalidArgumentException
+     * @throws GC2Exception
      */
     public function post_index(): array
     {
+        $r = func_get_arg(0);
+
         // Use bulk if content type is text/plain
         if (Input::getContentType() == Input::TEXT_PLAIN) {
-
+            [$this->subUser] = Util::extractUserFromSubUserString($r["user"]);
+            if (!empty($_SESSION["subuser"])) {
+                $this->subUser = $_SESSION["screen_name"];
+            }
             // Set API key from headers
             Input::setParams(
                 [
@@ -171,8 +181,8 @@ class Sql extends \app\inc\Controller
                 ]
             );
 
-            $settings_viewer = new \app\models\Setting();
-            $res = $settings_viewer->get();
+            $settings = new Setting();
+            $res = $settings->get();
 
             // Check if success
             // ================
@@ -184,12 +194,17 @@ class Sql extends \app\inc\Controller
             $this->api->connect();
             $this->apiKey = $res['data']->api_key;
 
+            if (empty(Input::getBody())) {
+                throw new GC2Exception("Empty text body", 403, null, "EMPTY_BODY");
+            }
+
             $sqls = explode("\n", Input::getBody());
             $this->api->begin(); // Start transaction
+            $res = [];
             foreach ($sqls as $q) {
                 $this->q = $q;
                 if ($this->q != "") {
-                    $res = unserialize($this->transaction($this->q));
+                    $res = unserialize($this->transaction(null, null, false));
                     if (!$res["success"]) {
                         $this->api->rollback();
                         return $res;
@@ -198,251 +213,157 @@ class Sql extends \app\inc\Controller
             }
             $this->api->commit();
             return $res;
-
         } else {
-            return $this->get_index(func_get_arg(0));
+            return $this->get_index($r);
         }
     }
 
     /**
-     * @param array $array
-     * @param string $needle
-     * @return array
-     */
-    private function recursiveFind(array $array, string $needle): array
-    {
-        $iterator = new \RecursiveArrayIterator($array);
-        $recursive = new \RecursiveIteratorIterator($iterator, \RecursiveIteratorIterator::SELF_FIRST);
-        $aHitList = [];
-        foreach ($recursive as $key => $value) {
-            if ($key === $needle) {
-                array_push($aHitList, $value);
-            }
-        }
-        return $aHitList;
-    }
-
-    /**
-     * @param array $fromArr
-     */
-    private function parseSelect(array $fromArr = null)
-    {
-        if (is_array($fromArr)) {
-            foreach ($fromArr as $table) {
-                if ($table["expr_type"] == "subquery") {
-
-                    // Recursive call
-                    $this->parseSelect($table["sub_tree"]["FROM"]);
-                }
-                $table["no_quotes"] = str_replace('"', '', $table["no_quotes"]);
-                if (
-                    explode(".", $table["no_quotes"])[0] == "settings" ||
-                    explode(".", $table["no_quotes"])[0] == "information_schema" ||
-                    explode(".", $table["no_quotes"])[0] == "sqlapi" ||
-                    explode(".", $table["no_quotes"])[1] == "geometry_columns" ||
-                    $table["no_quotes"] == "geometry_columns"
-                ) {
-                    $this->response['success'] = false;
-                    $this->response['message'] = "Can't complete the query";
-                    $this->response['code'] = 403;
-                    die(\app\inc\Response::toJson($this->response));
-                }
-                if ($table["no_quotes"]) {
-                    $this->usedRelations[] = $table["no_quotes"];
-                }
-                $this->usedRelations = array_unique($this->usedRelations);
-            }
-        }
-    }
-
-    /**
-     * @param string $sql
      * @param string|null $clientEncoding
+     * @param array|null $typeHints
+     * @param bool $convertReturning
+     * @param array|null $typeFormats
      * @return string
+     * @throws GC2Exception
+     * @throws InvalidArgumentException
+     * @throws \PhpOffice\PhpSpreadsheet\Reader\Exception
+     * @throws \PhpOffice\PhpSpreadsheet\Writer\Exception
      */
-    private function transaction(string $sql, string $clientEncoding = null)
+    private function transaction(?string $clientEncoding = null, ?array $typeHints = null, bool $convertReturning = true, ?array $typeFormats = null): string
     {
         $response = [];
-        if (strpos($sql, ';') !== false) {
-            $this->response['success'] = false;
-            $this->response['code'] = 403;
-            $this->response['message'] = "You can't use ';'. Use the bulk transaction API instead";
-            return serialize($this->response);
-        }
-        if (strpos($sql, '--') !== false) {
-            $this->response['success'] = false;
-            $this->response['code'] = 403;
-            $this->response['message'] = "SQL comments '--' are not allowed";
-            return serialize($this->response);
-        }
-        require_once dirname(__FILE__) . '/../../libs/PHP-SQL-Parser/src/PHPSQLParser.php';
-        try {
-            $parser = new \PHPSQLParser($sql, false);
-        } catch (\UnableToCalculatePositionException $e) {
-            $this->response['success'] = false;
-            $this->response['code'] = 403;
-            $this->response['message'] = $e->getMessage();
-            return serialize($this->response);
-        }
-        $parsedSQL = $parser->parsed ?: []; // Make its an array
-        $this->usedRelations = array();
-
-        // First recursive go through the SQL to find FROM in select, update and delete
-        foreach ($this->recursiveFind($parsedSQL, "FROM") as $x) {
-            $this->parseSelect($x);
-        }
+        $rule = new Rule(connection: $this->api->connection);
+        $walkerRelation = new TableWalkerRelation();
+        $factory = new StatementFactory(PDOCompatible: true);
+        $select = $factory->createFromString($this->q);
+        $operation = self::getClassName(get_class($select));
+        $select->dispatch($walkerRelation);
+        $usedRelations = $walkerRelation->getRelations();
+        $usedRelationsWithType = [];
 
         // Check auth on relations
-        foreach ($this->usedRelations as $rel) {
-            $response = $this->ApiKeyAuthLayer($rel, $this->subUser, false, Input::get('key'), $this->usedRelations);
+        foreach (array_merge($usedRelations["insert"], $usedRelations["updateAndDelete"]) as $rel) {
+            $usedRelationsWithType[$rel] = "t";
+        }
+        foreach ($usedRelations["all"] as $rel) {
+            if (!isset($usedRelationsWithType[$rel])) {
+                $usedRelationsWithType[$rel] = "s";
+            }
+        }
+        foreach ($usedRelationsWithType as $rel => $type) {
+            $response = $this->ApiKeyAuthLayer($rel, $type == "t", $usedRelationsWithType, $this->subUser, Input::get('key'));
             if (!$response["success"]) {
                 return serialize($response);
             }
         }
 
-        // Check SQL UPDATE
-        if (isset($parsedSQL['UPDATE'])) {
-            foreach ($parsedSQL['UPDATE'] as $table) {
-                if (
-                    explode(".", $table["no_quotes"])[0] == "settings" ||
-                    explode(".", $table["no_quotes"])[0] == "information_schema" ||
-                    explode(".", $table["no_quotes"])[0] == "sqlapi" ||
-                    explode(".", $table["no_quotes"])[1] == "geometry_columns" ||
-                    $table["no_quotes"] == "geometry_columns"
-                ) {
-                    $this->response['success'] = false;
-                    $this->response['message'] = "Can't complete the query";
-                    $this->response['code'] = 406;
-                    return serialize($this->response);
-                }
-                array_push($this->usedRelations, $table["no_quotes"]);
-                $response = $this->ApiKeyAuthLayer($table["no_quotes"], $this->subUser, true, Input::get('key'), $this->usedRelations);
-                if (!$response["success"]) {
-                    return serialize($response);
-                }
-            }
+        // Get rules and set them
+        $walkerRule = new TableWalkerRule(!empty($response["is_auth"]) ? $this->subUser ?: Connection::$param['postgisdb'] : "*", "sql", strtolower($operation), '');
+        $rules = $rule->get();
+        $walkerRule->setRules($rules);
+        $select->dispatch($walkerRule);
 
-            // Check SQL DELETE
-        } elseif (isset($parsedSQL['DELETE'])) {
-            foreach ($parsedSQL['FROM'] as $table) {
-                if (
-                    explode(".", $table["no_quotes"])[0] == "settings" ||
-                    explode(".", $table["no_quotes"])[0] == "information_schema" ||
-                    explode(".", $table["no_quotes"])[0] == "sqlapi" ||
-                    explode(".", $table["no_quotes"])[1] == "geometry_columns" ||
-                    $table["no_quotes"] == "geometry_columns"
-                ) {
-                    $this->response['success'] = false;
-                    $this->response['message'] = "Can't complete the query";
-                    $this->response['code'] = 406;
-                    return serialize($this->response);
-                }
-                $response = $this->ApiKeyAuthLayer($table["no_quotes"], $this->subUser, true, Input::get('key'), $this->usedRelations);
-                if (!$response["success"]) {
-                    return serialize($response);
-                }
-            }
-
-            // Check SQL INSERT
-        } elseif (isset($parsedSQL['INSERT'])) {
-            foreach ($parsedSQL['INSERT'] as $table) {
-                if (
-                    explode(".", $table["no_quotes"])[0] == "settings" ||
-                    explode(".", $table["no_quotes"])[0] == "information_schema" ||
-                    explode(".", $table["no_quotes"])[0] == "sqlapi" ||
-                    explode(".", $table["no_quotes"])[1] == "geometry_columns" ||
-                    $table["no_quotes"] == "geometry_columns"
-                ) {
-                    $this->response['success'] = false;
-                    $this->response['message'] = "Can't complete the query";
-                    $this->response['code'] = 406;
-                    return serialize($this->response);
-                }
-                array_push($this->usedRelations, $table["no_quotes"]);
-                $response = $this->ApiKeyAuthLayer($table["no_quotes"], $this->subUser, true, Input::get('key'), $this->usedRelations);
-                if (!$response["success"]) {
-                    return serialize($response);
-                }
-            }
-        }
-
-        if ($parsedSQL['DROP']) {
-            $this->response['success'] = false;
-            $this->response['code'] = 403;
-            $this->response['message'] = "DROP is not allowed through the API";
-        } elseif ($parsedSQL['ALTER']) {
-            $this->response['success'] = false;
-            $this->response['code'] = 403;
-            $this->response['message'] = "ALTER is not allowed through the API";
-        } elseif ($parsedSQL['CREATE']) {
-            if (isset($parsedSQL['CREATE']) && (isset($parsedSQL['VIEW']) || isset($parsedSQL['TABLE']))) {
-                if ($this->apiKey == Input::get('key') && $this->apiKey != false) {
-                    $this->response = $this->api->transaction($this->q);
-                    $this->addAttr($response);
-                } else {
-                    $this->response['success'] = false;
-                    $this->response['message'] = "Not the right key!";
-                    $this->response['code'] = 403;
-                }
+        // TODO Set this in TableWalkerRule
+        if ($operation == "Update" || $operation == "Insert" || $operation == "Delete") {
+            if ($operation == "Insert") {
+                $split = explode(".", $usedRelations["insert"][0]);
             } else {
-                $this->response['success'] = false;
-                $this->response['message'] = "Only CREATE VIEW is allowed through the API";
-                $this->response['code'] = 403;
+                $split = explode(".", $usedRelations["updateAndDelete"][0]);
             }
-        } elseif ($parsedSQL['UPDATE'] || $parsedSQL['INSERT'] || $parsedSQL['DELETE']) {
-            $this->response = $this->api->transaction($this->q);
+            $userFilter = new UserFilter($this->subUser ?: Connection::$param['postgisdb'], "sql", strtolower($operation), "*", $split[0], $split[1]);
+            $geofence = new Geofence($userFilter, $this->api->connection);
+            $auth = $geofence->authorize($rules);
+            $finaleStatement = $factory->createFromAST($select, true)->getSql();
+            if ($auth["access"] == Geofence::LIMIT_ACCESS) {
+                try {
+                    $geofence->postProcessQuery($select, $rules, Input::get('params'), $typeHints);
+                } catch (Exception $e) {
+                    $response = [];
+                    $response["code"] = 401;
+                    $response["success"] = false;
+                    $response["message"] = $e->getMessage();
+                    $response["statement"] = $finaleStatement;
+                    $response["filters"] = $auth["filters"];
+                    return serialize($response);
+                }
+            }
+            $this->response = $this->api->transaction($finaleStatement, Input::get('params') ?: null, Input::get('type_hints') ?: null, $convertReturning, Input::get('type_formats') ?: null);
+            $response["filters"] = $auth["filters"];
+            $response["statement"] = $finaleStatement;
             $this->addAttr($response);
-        } elseif (isset($parsedSQL['SELECT']) || isset($parsedSQL['UNION'])) {
+        } elseif ($operation == "Select" || $operation == "SetOpSelect") {
+            $this->q = $factory->createFromAST($select, true)->getSql();
             $lifetime = (Input::get('lifetime')) ?: 0;
-            $options = array('cacheDir' => \app\conf\App::$param['path'] . "app/tmp/", 'lifeTime' => $lifetime);
-            $Cache_Lite = new \Cache_Lite($options);
-            if ($this->data = $Cache_Lite->get($this->q)) {
-                //echo "Cached";
+            $key = md5(Connection::$param["postgisdb"] . "_" . $this->q . "_" . $lifetime);
+            if ($lifetime > 0) {
+                $CachedString = Cache::getItem($key);
+            }
+            if ($lifetime > 0 && !empty($CachedString) && $CachedString->isHit()) {
+                $this->data = $CachedString->get();
+                try {
+                    $CreationDate = $CachedString->getCreationDate();
+                } catch (Exception $e) {
+                    $CreationDate = $e->getMessage();
+                }
+                $this->cacheInfo["hit"] = $CreationDate;
+                $this->cacheInfo["tags"] = $CachedString->getTags();
+                $this->cacheInfo["signature"] = md5(serialize($this->data));
             } else {
-                //echo "Not cached";
                 ob_start();
-
-                $format = Input::get('format') ?: "geojson";
-                if (!in_array($format, ["geojson", "csv", "excel"])) {
-                    die("{$format} is not a supported format.");
+                $this->response = $this->api->sql(
+                    q: $this->q,
+                    clientEncoding: $clientEncoding,
+                    format: Input::get('format') ?: "geojson",
+                    geoformat: Input::get('geoformat') ?: null,
+                    csvAllToStr: Input::get('allstr') ?: false,
+                    aliasesFrom: Input::get('alias') ?: null,
+                    convertTypes: Input::get('convert_types') ?: false,
+                    parameters: Input::get('params') ?: null,
+                    typeHints: $typeHints,
+                    typeFormats: $typeFormats
+                );
+                if (empty($this->response)) {
+                    exit();
                 }
-
-                $geoformat = Input::get('geoformat') ?: null;
-                if (!in_array($geoformat, [null, "geojson", "wkt"])) {
-                    die("{$geoformat} is not a supported geom format.");
-                }
-                $csvAllToStr = Input::get('allstr') ?: null;
-
-                $alias = Input::get('alias') ?: null;
-
-
-                $this->response = $this->api->sql($this->q, $clientEncoding, $format, $geoformat, $csvAllToStr, $alias);
+                $response["statement"] = $this->q;
                 $this->addAttr($response);
-
                 echo serialize($this->response);
-                // Cache script
                 $this->data = ob_get_contents();
-                $Cache_Lite->save($this->data, $this->q);
+                if ($lifetime > 0 && !empty($CachedString)) {
+                    $CachedString->set($this->data)->expiresAfter($lifetime ?: 1);// Because 0 secs means cache will life for ever, we set cache to one sec
+                    Cache::save($CachedString);
+                    $this->cacheInfo["hit"] = false;
+                }
                 ob_get_clean();
             }
         } else {
-            $this->response['success'] = false;
-            $this->response['message'] = "Check your SQL. Could not recognise it as either SELECT, INSERT, UPDATE or DELETE";
-            $this->response['code'] = 400;
+            throw new GC2Exception("Check your SQL. Could not recognise it as either SELECT, INSERT, UPDATE or DELETE ($operation)", 403, null, "SQL_STATEMENT_NOT_RECOGNISED");
         }
         return serialize($this->response);
     }
 
     /**
-     * @param $arr
+     * @param array<string> $arr
      */
-    private function addAttr(array $arr)
+    private function addAttr(array $arr): void
     {
         foreach ($arr as $key => $value) {
             if ($key != "code") {
-                $this->response["auth_check"][$key] = $value;
+                $this->response["_auth_check"][$key] = $value;
             }
         }
 
+    }
+
+    /**
+     * @param string $classname
+     * @return string|false
+     */
+    private static function getClassName(string $classname): string|false
+    {
+        if ($pos = strrpos($classname, '\\')) {
+            return substr($classname, $pos + 1);
+        }
+        return false;
     }
 }

@@ -1,0 +1,81 @@
+<?php
+/**
+ * @author     Martin Høgh <mh@mapcentia.com>
+ * @copyright  2013-2025 MapCentia ApS
+ * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
+ *
+ */
+
+include_once(__DIR__ . "/../conf/App.php");
+include_once(__DIR__ . "/../vendor/autoload.php");
+
+use app\conf\App;
+use app\inc\SchedulerLock;
+use app\models\Database;
+use app\inc\Model;
+use GO\Scheduler;
+use Cron\CronExpression;
+
+new App();
+Database::setDb("gc2scheduler");
+
+// Mark runs whose process died without bookkeeping as lost (their advisory
+// lock is gone), so the API and the UI never show phantom running jobs.
+try {
+    $lost = new SchedulerLock()->reap();
+    if ($lost > 0) {
+        echo "Marked $lost lost run(s)\n";
+    }
+} catch (Throwable $e) {
+    error_log("scheduler: reaper failed: " . $e->getMessage());
+}
+
+$scheduler = new Scheduler([
+    'tempDir' =>  App::$param['path'] . 'app/tmp'
+]);
+
+$model = new Model();
+
+$sql = "SELECT * FROM jobs ORDER BY id";
+
+$res = $model->prepare($sql);
+try {
+    $res->execute();
+} catch (PDOException $e) {
+    print_r($e);
+    exit(1);
+}
+
+while ($row = $model->fetchRow($res)) {
+    if (!empty($row["active"]) && ((isset(App::$param["gc2scheduler"][$row["db"]]) && App::$param["gc2scheduler"][$row["db"]] === true) || (isset(App::$param["gc2scheduler"]["*"]) && App::$param["gc2scheduler"]["*"] === true))) {
+        $args = [
+            "--id" => $row["id"],
+            "--db" => $row["db"],
+        ];
+        // We run the job function through another script, so it runs async
+        // If using $scheduler->call() jobs will run in sync
+        $cmd = App::$param['path'] . "app/scripts/scheduler_run_job.php";
+        $expression = "{$row["min"]} {$row["hour"]} {$row["dayofmonth"]} {$row["month"]} {$row["dayofweek"]}";
+        try {
+            $cron = new CronExpression($expression);
+        } catch (InvalidArgumentException $e) {
+            error_log($e->getMessage());
+            continue;
+        }
+        try {
+            $scheduler->php(
+                $cmd,
+                PHP_BINARY,
+                $args,
+                $row["id"] . "_" . $row["name"]
+            )->at($expression)->output([
+                __DIR__ . "/../../public/logs/{$row["id"]}_scheduler.log"
+            ])->onlyOne();
+            $scheduler->run();
+        } catch (Exception $e) {
+            echo "Could not run job {$row['id']}. ERROR: " . $e->getMessage() . "\n";
+        }
+    }
+}
+
+

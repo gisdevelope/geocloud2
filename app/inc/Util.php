@@ -1,58 +1,55 @@
 <?php
 /**
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2024 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
  *
  */
 
 namespace app\inc;
 
+use Exception;
+
+
+/**
+ * Class Util
+ * @package app\inc
+ */
 class Util
 {
     /**
-     * @param $class
-     * @param $object
+     * @param string $class
+     * @param object|array $object
      * @return mixed
      */
-    static function casttoclass($class, $object)
+    public static function casttoclass(string $class, object|array $object): mixed
     {
         return unserialize(preg_replace('/^O:\d+:"[^"]++"/', 'O:' . strlen($class) . ':"' . $class . '"', serialize($object)));
     }
 
     /**
-     * @param $dir
+     * @param string $dir
      */
-    static function rrmdir($dir)
+    public static function rrmdir(string $dir): void
     {
         if (is_dir($dir)) {
             $objects = scandir($dir);
             foreach ($objects as $object) {
                 if ($object != "." && $object != "..") {
-                    if (filetype($dir . "/" . $object) == "dir") rrmdir($dir . "/" . $object); else unlink($dir . "/" . $object);
+                    if (filetype($dir . "/" . $object) == "dir") self::rrmdir($dir . "/" . $object); else unlink($dir . "/" . $object);
                 }
             }
-            reset($objects);
             rmdir($dir);
         }
     }
 
     /**
-     * @param $match
-     * @return null|string|string[]
-     */
-    static function replace_unicode_escape_sequence($match)
-    {
-        return mb_convert_encoding(pack('H*', $match[1]), 'UTF-8', 'UCS-2BE');
-    }
-
-    /**
-     * @param $hexStr
+     * @param string $hexStr
      * @param bool $returnAsString
      * @param string $seperator
-     * @return array|bool|string
+     * @return array<string>|bool|string
      */
-    static function hex2RGB($hexStr, $returnAsString = false, $seperator = ',')
+    public static function hex2RGB(string $hexStr, bool $returnAsString = false, string $seperator = ','): array|bool|string
     {
         $hexStr = preg_replace("/[^0-9A-Fa-f]/", '', $hexStr);
         // Gets a proper hex string
@@ -77,46 +74,92 @@ class Util
     /**
      * @return string
      */
-    static function randHexColor()
+    public static function randHexColor(): string
     {
         return sprintf('#%06X', mt_rand(0, 0xFFFFFF));
     }
 
     /**
-     * @param $code
-     * @return mixed
+     * @param int|string $code
+     * @return string|null
      */
-    static function httpCodeText($code)
+    public static function httpCodeText(int|string $code): string|null
     {
         $codes = array(
-            200 => "OK",
-            304 => "Not Modified",
-            400 => "Bad Request",
-            401 => "Unauthorized",
-            403 => "Forbidden",
-            404 => "Not Found",
-            406 => "Not Acceptable",
-            410 => "Gone",
-            420 => "Enhance Your Calm",
-            422 => "Unprocessable Entity",
-            429 => "Too Many Requests",
-            500 => "Internal Server Error",
-            502 => "Bad Gateway",
-            503 => "Service Unavailable",
-            504 => "Gateway timeout"
+            100 => 'Continue',
+            102 => 'Processing',
+            103 => 'Early Hints',
+            200 => 'OK',
+            201 => 'Created',
+            202 => 'Accepted',
+            203 => 'Non-Authoritative Information',
+            204 => 'No Content',
+            205 => 'Reset Content',
+            206 => 'Partial Content',
+            207 => 'Multi-Status',
+            208 => 'Already Reported',
+            226 => 'IM Used',
+            300 => 'Multiple Choices',
+            301 => 'Moved Permanently',
+            302 => 'Found',
+            303 => 'See Other',
+            304 => 'Not Modified',
+            305 => 'Use Proxy',
+            306 => 'Reserved',
+            307 => 'Temporary Redirect',
+            308 => 'Permanent Redirect',
+            400 => 'Bad Request',
+            401 => 'Unauthorized',
+            402 => 'Payment Required',
+            403 => 'Forbidden',
+            404 => 'Not Found',
+            405 => 'Method Not Allowed',
+            406 => 'Not Acceptable',
+            407 => 'Proxy Authentication Required',
+            408 => 'Request Timeout',
+            409 => 'Conflict',
+            410 => 'Gone',
+            411 => 'Length Required',
+            412 => 'Precondition Failed',
+            413 => 'Request Entity Too Large',
+            414 => 'Request-URI Too Long',
+            415 => 'Unsupported Media Type',
+            416 => 'Requested Range Not Satisfiable',
+            417 => 'Expectation Failed',
+            418 => 'Unassigned',
+            421 => 'Misdirected Request',
+            422 => 'Unprocessable Entity',
+            423 => 'Locked',
+            424 => 'Failed Dependency',
+            425 => 'Too Early',
+            426 => 'Upgrade Required',
+            428 => 'Precondition Required',
+            429 => 'Too Many Requests',
+            431 => 'Request Header Fields Too Large',
+            451 => 'Unavailable For Legal Reasons',
+            500 => 'Internal Server Error',
+            501 => 'Not Implemented',
+            502 => 'Bad Gateway',
+            503 => 'Service Unavailable',
+            504 => 'Gateway Timeout',
+            505 => 'HTTP Version Not Supported',
+            506 => 'Variant Also Negotiates',
+            507 => 'Insufficient Storage',
+            508 => 'Loop Detected',
+            510 => 'Not Extended',
+            511 => 'Network Authentication Required'
         );
-        return $codes[$code];
+        return $codes[$code] ?? null;
     }
 
     /**
-     * @param $start
-     * @param $end
-     * @param $steps
+     * @param string $start
+     * @param string $end
+     * @param int $steps
      * @return array
      */
-    static function makeGradient($start, $end, $steps)
+    public static function makeGradient(string $start, string $end, int $steps): array
     {
-
         $theColorBegin = hexdec($start);
         $theColorEnd = hexdec($end);
 
@@ -128,23 +171,12 @@ class Util
         $theG1 = ($theColorEnd & 0x00ff00) >> 8;
         $theB1 = ($theColorEnd & 0x0000ff) >> 0;
 
-        function interpolate($pBegin, $pEnd, $pStep, $pMax)
-        {
-            if ($pBegin < $pEnd) {
-                return (($pEnd - $pBegin) * ($pStep / $pMax)) + $pBegin;
-            } else {
-                return (($pBegin - $pEnd) * (1 - ($pStep / $pMax))) + $pEnd;
-            }
-        }
-
         $grad = array();
         for ($i = 0; $i <= $steps; $i++) {
-            $theR = interpolate($theR0, $theR1, $i, $steps);
-            $theG = interpolate($theG0, $theG1, $i, $steps);
-            $theB = interpolate($theB0, $theB1, $i, $steps);
-
+            $theR = (int)self::interpolate($theR0, $theR1, $i, $steps);
+            $theG = (int)self::interpolate($theG0, $theG1, $i, $steps);
+            $theB = (int)self::interpolate($theB0, $theB1, $i, $steps);
             $theVal = ((($theR << 8) | $theG) << 8) | $theB;
-
             $grad[] = sprintf("#%06X", $theVal);
         }
         return $grad;
@@ -152,9 +184,89 @@ class Util
     }
 
     /**
+     * @param int $pBegin
+     * @param int $pEnd
+     * @param int $pStep
+     * @param int $pMax
      * @return float
      */
-    static function microtime_float()
+    private static function interpolate(int $pBegin, int $pEnd, int $pStep, int $pMax): float
+    {
+        if ($pBegin < $pEnd) {
+            return (($pEnd - $pBegin) * ($pStep / $pMax)) + $pBegin;
+        } else {
+            return (($pBegin - $pEnd) * (1 - ($pStep / $pMax))) + $pEnd;
+        }
+    }
+
+    /**
+     * @return float
+     */
+    /**
+     * What kind of archive a downloaded file is, by its own first bytes: 'zip',
+     * 'gz', or null for anything that is not an archive.
+     *
+     * The bytes, not the URL's extension: a job URL can be a query
+     * (…/api/v2/sql/fkg?format=ogr/flatgeobuf&q=select…) that ends in no
+     * extension at all, while the response is very much a zip.
+     */
+    public static function archiveKind(string $path): ?string
+    {
+        if (!is_file($path)) {
+            return null;
+        }
+        $fh = @fopen($path, 'rb');
+        if ($fh === false) {
+            return null;
+        }
+        $magic = (string)fread($fh, 4);
+        fclose($fh);
+        // "PK\x03\x04" holds an entry, "PK\x05\x06" is the empty archive and
+        // "PK\x07\x08" a spanned one; all three are zips to ZipArchive.
+        if (str_starts_with($magic, "PK\x03\x04") || str_starts_with($magic, "PK\x05\x06") || str_starts_with($magic, "PK\x07\x08")) {
+            return 'zip';
+        }
+        if (str_starts_with($magic, "\x1f\x8b")) {
+            return 'gz';
+        }
+        return null;
+    }
+
+    /**
+     * Whether a response's headers describe a zip, i.e. whether the scheduler
+     * should unpack the download rather than hand it to ogr2ogr as it is.
+     *
+     * Servers spell the type in more ways than one: with parameters, in any
+     * case, and sometimes as a list — GC2's own SQL API answers
+     * "application/zip, application/octet-stream" for a format=ogr/… query — so
+     * an exact match on one spelling misses real zips. A server that only says
+     * application/octet-stream is caught by the Content-Disposition filename.
+     * Nothing else is consulted: a .zip named in some other header says nothing
+     * about the body.
+     *
+     * @param list<string> $headers raw "Name: value" lines, as get_headers() returns them
+     */
+    public static function headersSayZip(array $headers): bool
+    {
+        foreach ($headers as $header) {
+            $parts = explode(':', (string)$header, 2);
+            if (count($parts) !== 2) {
+                continue;
+            }
+            $name = strtolower(trim($parts[0]));
+            $value = strtolower($parts[1]);
+            if ($name === 'content-type'
+                && (str_contains($value, 'application/zip') || str_contains($value, 'application/x-zip'))) {
+                return true;
+            }
+            if ($name === 'content-disposition' && preg_match('/filename\s*=\s*"?[^"]*\.zip"?/', $value) === 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static function microtime_float(): float
     {
         list($usec, $sec) = explode(" ", microtime());
         return ((float)$usec + (float)$sec);
@@ -163,7 +275,7 @@ class Util
     /**
      * @return string
      */
-    static function protocol()
+    public static function protocol(): string
     {
         if (isset($_SERVER['HTTPS']) &&
             ($_SERVER['HTTPS'] == 'on' || $_SERVER['HTTPS'] == 1) ||
@@ -178,16 +290,41 @@ class Util
     }
 
     /**
-     * @param $ip
-     * @param $range
+     * @return string  e.g. "https://example.com" or "http://localhost:8080"
+     */
+    public static function host(): string
+    {
+        $port = $_SERVER['SERVER_PORT'] ?? '';
+        return self::protocol() . '://' . ($_SERVER['SERVER_NAME'] ?? '')
+            . ($port !== '' && $port !== '80' && $port !== '443' ? ":$port" : '');
+    }
+
+    /**
+     * @return string  Base URL + path prefix (strips the query string, "index.php" and deduplicates slashes)
+     */
+    public static function thePath(): string
+    {
+        $uri = $_SERVER['REDIRECT_URL'] ?? $_SERVER['REQUEST_URI'] ?? '';
+        // Drop any query string. On Apache mod_rewrite REDIRECT_URL is already path-only, but on
+        // FrankenPHP/Caddy only REQUEST_URI is set and it carries "?SERVICE=WFS&REQUEST=..." — that
+        // raw "&" would land unescaped in the WFS Capabilities xlink:href values and break the XML.
+        $uri = explode('?', $uri, 2)[0];
+        $uri = str_replace('index.php', '', $uri);
+        $uri = str_replace('//', '/', $uri);
+        return self::host() . $uri;
+    }
+
+    /**
+     * @param string $ip
+     * @param string $ipWithCidr
      * @return bool
      */
-    static function ipInRange($ip, $range)
+    public static function ipInRange(string $ip, string $ipWithCidr): bool
     {
-        if (strpos($range, '/') !== false) {
+        if (str_contains($ipWithCidr, '/')) {
             // $range is in IP/NETMASK format
-            list($range, $netmask) = explode('/', $range, 2);
-            if (strpos($netmask, '.') !== false) {
+            list($range, $netmask) = explode('/', $ipWithCidr, 2);
+            if (str_contains($netmask, '.')) {
                 // $netmask is a 255.255.0.0 format
                 $netmask = str_replace('*', '0', $netmask);
                 $netmask_dec = ip2long($netmask);
@@ -206,22 +343,22 @@ class Util
                 #$netmask_dec = bindec(str_pad('', $netmask, '1') . str_pad('', 32-$netmask, '0'));
 
                 # Strategy 2 - Use math to create it
-                $wildcard_dec = pow(2, (32 - $netmask)) - 1;
+                $wildcard_dec = pow(2, (32 - (int)$netmask)) - 1;
                 $netmask_dec = ~$wildcard_dec;
 
                 return (($ip_dec & $netmask_dec) == ($range_dec & $netmask_dec));
             }
         } else {
             // range might be 255.255.*.* or 1.2.3.0-1.2.3.255
-            if (strpos($range, '*') !== false) { // a.b.*.* format
+            if (str_contains($ipWithCidr, '*')) { // a.b.*.* format
                 // Just convert to A-B format by setting * to 0 for A and 255 for B
-                $lower = str_replace('*', '0', $range);
-                $upper = str_replace('*', '255', $range);
-                $range = "$lower-$upper";
+                $lower = str_replace('*', '0', $ipWithCidr);
+                $upper = str_replace('*', '255', $ipWithCidr);
+                $ipWithCidr = "$lower-$upper";
             }
 
-            if (strpos($range, '-') !== false) { // A-B format
-                list($lower, $upper) = explode('-', $range, 2);
+            if (str_contains($ipWithCidr, '-')) { // A-B format
+                list($lower, $upper) = explode('-', $ipWithCidr, 2);
                 $lower_dec = (float)sprintf("%u", ip2long($lower));
                 $upper_dec = (float)sprintf("%u", ip2long($upper));
                 $ip_dec = (float)sprintf("%u", ip2long($ip));
@@ -235,19 +372,19 @@ class Util
     /**
      * @return string
      */
-    static function clientIp()
+    public static function clientIp(): string
     {
-        if ($_SERVER['HTTP_CLIENT_IP'])
+        if (!empty($_SERVER['HTTP_CLIENT_IP']))
             $ipAddress = $_SERVER['HTTP_CLIENT_IP'];
-        else if ($_SERVER['HTTP_X_FORWARDED_FOR'])
+        else if (!empty($_SERVER['HTTP_X_FORWARDED_FOR']))
             $ipAddress = $_SERVER['HTTP_X_FORWARDED_FOR'];
-        else if ($_SERVER['HTTP_X_FORWARDED'])
+        else if (!empty($_SERVER['HTTP_X_FORWARDED']))
             $ipAddress = $_SERVER['HTTP_X_FORWARDED'];
-        else if ($_SERVER['HTTP_FORWARDED_FOR'])
+        else if (!empty($_SERVER['HTTP_FORWARDED_FOR']))
             $ipAddress = $_SERVER['HTTP_FORWARDED_FOR'];
-        else if ($_SERVER['HTTP_FORWARDED'])
+        else if (!empty($_SERVER['HTTP_FORWARDED']))
             $ipAddress = $_SERVER['HTTP_FORWARDED'];
-        else if ($_SERVER['REMOTE_ADDR'])
+        else if (!empty($_SERVER['REMOTE_ADDR']))
             $ipAddress = $_SERVER['REMOTE_ADDR'];
         else
             $ipAddress = 'UNKNOWN';
@@ -255,40 +392,216 @@ class Util
     }
 
     /**
-     * @param $url
+     * @param string $url
      * @param int $connectTimeout
      * @param int $timeout
-     * @return mixed
-     * @throws \Exception
+     * @return string|bool
+     * @throws Exception
      */
-    static function wget($url, $connectTimeout = 10, $timeout = 0)
+    public static function wget(string $url, int $connectTimeout = 10, int $timeout = 0): string|bool
     {
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "GET");
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, TRUE);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, $connectTimeout);
         curl_setopt($ch, CURLOPT_TIMEOUT, $timeout);
 
         $buffer = curl_exec($ch);
         curl_close($ch);
 
-        if (isset($buffer['curl_error'])) throw new \Exception($buffer['curl_error']);
-        if (isset($buffer['http_code']) && $buffer['http_code'] != '200') throw new \Exception("HTTP Code = " . $buffer['http_code']);
+        if (isset($buffer['curl_error'])) {
+            throw new Exception($buffer['curl_error']);
+        }
+        if (isset($buffer['http_code']) && $buffer['http_code'] != "200") {
+            throw new Exception("HTTP Code = " . $buffer['http_code']);
+        }
 
         return $buffer;
     }
 
     /**
-     * @param $url
+     * @param string $url
      * @param string $payload
      * @return bool
      */
-    static function asyncRequest($url, $payload = "")
+    public static function asyncRequest(string $url, string $payload = ""): bool
     {
         $cmd = "curl -XGET -H 'Content-Type: application/json'";
         $cmd .= " -d '" . $payload . "' " . "'" . $url . "'";
         $cmd .= " > /dev/null 2>&1 &";
         exec($cmd, $output, $exit);
         return $exit == 0;
+    }
+
+    /**
+     * @return string
+     */
+    public static function guid(): string
+    {
+        if (function_exists('com_create_guid') === true) {
+            return trim(com_create_guid(), '{}');
+        }
+
+        return sprintf('%04X%04X-%04X-%04X-%04X-%04X%04X%04X', mt_rand(0, 65535), mt_rand(0, 65535), mt_rand(0, 65535), mt_rand(16384, 20479), mt_rand(32768, 49151), mt_rand(0, 65535), mt_rand(0, 65535), mt_rand(0, 65535));
+    }
+
+    /**
+     *
+     */
+    public static function disableOb(): void
+    {
+        // Turn off output buffering
+        ini_set('output_buffering', 'off');
+        // Turn off PHP output compression
+        ini_set('zlib.output_compression', 'off');
+        // Implicitly flush the buffer(s)
+        ini_set('implicit_flush', 'true');
+        ob_implicit_flush();
+        // Clear, and turn off output buffering
+        while (ob_get_level() > 0) {
+            // Get the curent level
+            $level = ob_get_level();
+            // End the buffering
+            ob_end_clean();
+            // If the current level has not changed, abort
+            if (ob_get_level() == $level) break;
+        }
+    }
+
+    /**
+     * @param string $str
+     * @return string
+     */
+    public static function base64urlDecode(string $str): string
+    {
+        return base64_decode(str_replace(array('-', '_'), array('+', '/'), $str));
+    }
+
+    /**
+     * @param string $str
+     * @return string
+     */
+    public static function base64urlEncode(string $str): string
+    {
+        return rtrim(strtr(base64_encode($str), '+/', '-_'), '=');
+    }
+
+
+    /**
+     * @param string $sValue
+     * @return string
+     */
+    public static function format(string $sValue): string
+    {
+        return trim($sValue);
+    }
+
+    public static function json2cvs(string $inputFile, string $outputFile): bool
+    {
+        $cmd = "jq -cn --stream 'first(fromstream(1|truncate_stream(inputs)))' $inputFile | jq -r '(keys_unsorted) | @csv' > $outputFile";
+        exec($cmd, $output, $exit);
+        if ($exit != 0) {
+            return false;
+        }
+        $cmd = "jq -cn --stream 'fromstream(1|truncate_stream(inputs))' $inputFile | jq -r '([.[]]) | @csv' >> $outputFile";
+        exec($cmd, $output, $exit);
+        if ($exit != 0) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Generate a strong password with specified length, character sets, and option to add dashes
+     *
+     * @param int $length Length of the password (default 15)
+     * @param bool $add_dashes Whether to add dashes in the password (default false)
+     * @param string $available_sets Character sets to include in the password (default 'luds')
+     * @return string Generated password
+     */
+    public function generateStrongPassword(int $length = 15, bool $add_dashes = false, string $available_sets = 'luds'): string
+    {
+        function tweak_array_rand($array): int|array|string
+        {
+            if (function_exists('random_int')) {
+                return random_int(0, count($array) - 1);
+            } elseif(function_exists('mt_rand')) {
+                return mt_rand(0, count($array) - 1);
+            } else {
+                return array_rand($array);
+            }
+        }
+        $sets = array();
+        if(str_contains($available_sets, 'l'))
+            $sets[] = 'abcdefghjkmnpqrstuvwxyz';
+        if(str_contains($available_sets, 'u'))
+            $sets[] = 'ABCDEFGHJKMNPQRSTUVWXYZ';
+        if(str_contains($available_sets, 'd'))
+            $sets[] = '23456789';
+        if(str_contains($available_sets, 's'))
+            $sets[] = '!@#$%&*?';
+
+        $all = '';
+        $password = '';
+        foreach($sets as $set)
+        {
+            $password .= $set[tweak_array_rand(str_split($set))];
+            $all .= $set;
+        }
+
+        $all = str_split($all);
+        for($i = 0; $i < $length - count($sets); $i++)
+            $password .= $all[tweak_array_rand($all)];
+
+        $password = str_shuffle($password);
+
+        if(!$add_dashes)
+            return $password;
+
+        $dash_len = floor(sqrt($length));
+        $dash_str = '';
+        while(strlen($password) > $dash_len)
+        {
+            $dash_str .= substr($password, 0, $dash_len) . '-';
+            $password = substr($password, $dash_len);
+        }
+        $dash_str .= $password;
+        return $dash_str;
+    }
+
+    /**
+     * Extracts the main user and sub-user components from a string formatted as "mainUser@subUser".
+     *
+     * @param string $userString The input string containing the main user and sub-user, separated by '@'.
+     * @return array An array where the first element is the main user and the second element is the sub-user,
+     *               or null if no sub-user is present.
+     */
+    public static function extractUserFromSubUserString(string $userString): array
+    {
+        $separatorPosition = strrpos($userString, '@');
+        if ($separatorPosition === false) {
+            return [null, $userString];
+        }
+
+        return [
+            substr($userString, 0, $separatorPosition),
+            substr($userString, $separatorPosition + 1),
+        ];
+    }
+
+    public static function encodeUrl(string $url): string
+    {
+        return preg_replace_callback(
+            '/%(?:[0-9A-Fa-f]{2})|[^A-Za-z0-9\-._~:\/?#\[\]@!$&\'()*+,;=%]/u',
+            function ($match) {
+                if ($match[0][0] === '%') {
+                    return $match[0];
+                }
+                return rawurlencode($match[0]);
+            },
+            $url
+        );
     }
 }

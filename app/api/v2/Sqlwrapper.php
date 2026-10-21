@@ -1,16 +1,19 @@
 <?php
 /**
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2026 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
  *
  */
 
 namespace app\api\v2;
 
-use \app\inc\Route;
-use \app\inc\Input;
-use \GuzzleHttp\Client;
+use app\inc\Controller;
+use app\inc\Route;
+use app\inc\Input;
+use Exception;
+use GuzzleHttp\Client;
+use XML_Unserializer;
 
 include_once(__DIR__ . "../../../libs/PEAR/XML/Unserializer.php");
 include_once(__DIR__ . "../../../libs/PEAR/XML/Serializer.php");
@@ -19,7 +22,7 @@ include_once(__DIR__ . "../../../libs/PEAR/XML/Serializer.php");
  * Class Qgis
  * @package app\api\v1
  */
-class Sqlwrapper extends \app\inc\Controller
+class Sqlwrapper extends Controller
 {
     /**
      * Sqlwrapper constructor.
@@ -43,16 +46,16 @@ class Sqlwrapper extends \app\inc\Controller
 
         $rasterData = null;
 
-        $data = explode(",", Input::get("custom_data"));
+        $body = json_decode(Input::getBody(), true);
+        $data = $body["custom_data"];
         $schema = explode(".", $data[0])[0];
         $db = Route::getParam("user");
 
-        if (sizeof($data) == 9) {
+        if ($data && sizeof($data) == 9) {
             $getFeatureInfoUrl = "http://127.0.0.1/ows/{$db}/{$schema}?LAYERS={$data[0]}&QUERY_LAYERS={$data[0]}&STYLES=&SERVICE=WMS&VERSION=1.1.1&REQUEST=GetFeatureInfo&BBOX={$data[5]},{$data[6]},{$data[7]},{$data[8]}&FEATURE_COUNT=1&HEIGHT={$data[2]}&WIDTH={$data[1]}&FORMAT=image%2Fpng&INFO_FORMAT=application%2Fvnd.ogc.gml&SRS=EPSG%3A4326&X={$data[3]}&Y={$data[4]}";
-            //die($getFeatureInfoUrl);
             try {
                 $res = $client->get($getFeatureInfoUrl);
-            } catch (\Exception $e) {
+            } catch (Exception $e) {
                 $response['success'] = false;
                 $response['message'] = $e->getMessage();
                 $response['code'] = 400;
@@ -61,7 +64,7 @@ class Sqlwrapper extends \app\inc\Controller
 
             $xml = $res->getBody();
 
-            $unserializer = new \XML_Unserializer(array(
+            $unserializer = new XML_Unserializer(array(
                 'parseAttributes' => false,
                 'typeHints' => false
             ));
@@ -93,13 +96,13 @@ class Sqlwrapper extends \app\inc\Controller
         }
 
         $form = [
-            "q" => Input::get("q"),
-            "base64" => Input::get("base64"),
-            "srs" => Input::get("srs"),
-            "lifetime" => Input::get("lifetime"),
-            "client_encoding" => Input::get("client_encoding"),
-            "format" => Input::get("format"),
-            "key" => Input::get("key"),
+            "q" => $body["q"],
+            "base64" => $body["base64"] === true || $body["base64"] === "true" ? "true" : "false",
+            "srs" => $body["srs"],
+            "lifetime" => $body["lifetime"],
+            "client_encoding" => $body["client_encoding"],
+            "format" => $body["format"],
+            "key" => $body["key"],
         ];
 
         $url = "http://127.0.0.1/api/v2/sql/" . $db;
@@ -107,7 +110,7 @@ class Sqlwrapper extends \app\inc\Controller
         // POST the transaction
         try {
             $res = $client->post($url, ['form_params' => $form]);
-        } catch (\Exception $e) {
+        } catch (Exception $e) {
             $response['success'] = false;
             $response['message'] = $e->getMessage();
             $response['code'] = 400;

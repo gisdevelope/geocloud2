@@ -1,0 +1,100 @@
+<?php
+/**
+ * @author     Martin Høgh <mh@mapcentia.com>
+ * @copyright  2013-2025 MapCentia ApS
+ * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
+ *
+ */
+
+namespace app\event\tasks;
+
+use Amp\Cancellation;
+use Amp\Parallel\Worker\Task;
+use Amp\Sync\Channel;
+use app\conf\App;
+use app\exceptions\GC2Exception;
+use app\inc\Cache;
+use app\inc\Connection;
+use app\models\Sql;
+use PhpOffice\PhpSpreadsheet\Writer\Exception;
+
+
+final readonly class PreparePayloadTask implements Task
+{
+    public function __construct(
+        private array  $batchPayload,
+        private string $db
+    )
+    {
+    }
+
+    /**
+     * @throws GC2Exception
+     * @throws Exception
+     * @throws \PhpOffice\PhpSpreadsheet\Reader\Exception
+     * @throws \Exception
+     */
+    public function run(Channel $channel, Cancellation $cancellation): array
+    {
+        echo "[INFO] PreparePayloadTask Worker PID: " . getmypid() . "\n";
+        new App();
+        Cache::setInstance();
+        $api = new Sql(connection: new Connection(database: $this->db));
+        $api->begin();
+
+        $results = [];
+        $grouped = [];
+        // Group notifications by schema.table + key
+        foreach ($this->batchPayload as $p) {
+            $op = $p['op'];
+            $schema = $p['schema'];
+            $table = $p['table'];
+            $key = $p['pk_column'];
+            $value = $p['pk_value'];
+
+            $schemaTable = "{$schema}.{$table}";
+            $results[$this->db][$schemaTable][$op][] = [$key, $value];
+
+            // If outbox row has a pre-built payload, use it directly as full_data
+            if (!empty($p['payload'])) {
+                $decoded = json_decode($p['payload'], true);
+                if (is_array($decoded)) {
+                    if (!isset($results[$this->db][$schemaTable]['full_data'])) {
+                        $results[$this->db][$schemaTable]['full_data'] = [];
+                    }
+                    $results[$this->db][$schemaTable]['full_data'][] = $decoded;
+                }
+            } elseif ($op === 'INSERT' || $op === 'UPDATE') {
+                $groupKey = $schemaTable . ':' . $key;
+                if (!isset($grouped[$groupKey])) {
+                    $grouped[$groupKey] = [
+                        'schemaTable' => $schemaTable,
+                        'key' => $key,
+                        'values' => []
+                    ];
+                }
+                $grouped[$groupKey]['values'][] = $value;
+            }
+        }
+        foreach ($grouped as $grp) {
+            $schemaTable = $grp['schemaTable'];
+            $key = $grp['key'];
+            $uniqueVals = array_unique($grp['values']);
+            // Build IN list safely (better: prepared statements)
+            $inList = implode(',', $uniqueVals);
+            $sql = "SELECT * FROM {$schemaTable} WHERE \"{$key}\" IN ($inList)";
+            echo $sql . "\n";
+            $response = $api->sql(q: $sql, format: 'json', convertTypes: true);
+            if (!isset($results[$this->db][$schemaTable]['full_data'])) {
+                $results[$this->db][$schemaTable]['full_data'] = [];
+            }
+            $results[$this->db][$schemaTable]['full_data'] = array_merge(
+                $results[$this->db][$schemaTable]['full_data'],
+                $response['data']
+            );
+        }
+        $api->commit();
+        $api->close();
+        return $results;
+    }
+}

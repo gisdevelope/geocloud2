@@ -1,6 +1,6 @@
 /*
  * @author     Martin Høgh <mh@mapcentia.com>
- * @copyright  2013-2018 MapCentia ApS
+ * @copyright  2013-2019 MapCentia ApS
  * @license    http://www.gnu.org/licenses/#AGPL  GNU AFFERO GENERAL PUBLIC LICENSE 3
  *  
  */
@@ -33,17 +33,23 @@ Ext.MessageBox.buttonText = {
     yes: "<i class='fa fa-check'></i> " + __("Yes"),
     no: "<i class='fa fa-remove'></i> " + __("No")
 };
+Ext.util.Format.comboRenderer = function (combo) {
+    return function (value) {
+        var record = combo.findRecord(combo.valueField, value);
+        return record ? record.get(combo.displayField) : combo.valueNotFoundText;
+    }
+};
 
 /**
  * Set vars in function scope
  */
 var form, store, writeFiles, writeMapCacheFile, clearTileCache, updateLegend, activeLayer, onEditWMSClasses, onAdd,
-    resetButtons,
+    resetButtons, changeLayerType, isLoaded = false,
     initExtent = null, App = new Ext.App({}), updatePrivileges, updateWorkflow, settings,
     extentRestricted = false, spinner, styleWizardWin, workflowStore, workflowStoreLoaded = false,
     subUserGroups = {},
     dataStore, dataGrid, tableDataLoaded = false, dataPanel, esPanel, esGrid,
-    enableWorkflow = (window.gc2Options.enableWorkflow !== null && typeof window.gc2Options.enableWorkflow[screenName] !== "undefined" && window.gc2Options.enableWorkflow[screenName] === true) || (window.gc2Options.enableWorkflow !== null && typeof window.gc2Options.enableWorkflow["*"] !== "undefined" && window.gc2Options.enableWorkflow["*"] === true);
+    enableWorkflow = (window.gc2Options.enableWorkflow !== null && typeof window.gc2Options.enableWorkflow[parentdb] !== "undefined" && window.gc2Options.enableWorkflow[parentdb] === true) || (window.gc2Options.enableWorkflow !== null && typeof window.gc2Options.enableWorkflow["*"] !== "undefined" && window.gc2Options.enableWorkflow["*"] === true);
 
 var cloud, gc2, layer, grid, featureStore, map, viewport, drawControl, gridPanel, modifyControl, tree,
     viewerSettings,
@@ -106,7 +112,7 @@ $(document).ready(function () {
         ];
     }
 
-    cloud = new mygeocloud_ol.map(null, screenName, {
+    cloud = new mygeocloud_ol.map(null, parentdb, {
         controls: [
             new OpenLayers.Control.Navigation({}),
             new OpenLayers.Control.Zoom(),
@@ -139,11 +145,10 @@ $(document).ready(function () {
         clicktimer = undefined;
     });
     gc2.on("click", function (e) {
-        var layers, count = 0, hit = false, event = new geocloud.clickEvent(e, cloud), distance, db = screenName;
+        var layers, count = 0, hit = false, event = new geocloud.clickEvent(e, cloud), distance, db = parentdb;
         if (clicktimer) {
             clearTimeout(clicktimer);
-        }
-        else {
+        } else {
             clicktimer = setTimeout(function (e) {
                 clicktimer = undefined;
                 var coords = event.getCoordinate();
@@ -151,8 +156,7 @@ $(document).ready(function () {
                     try {
                         st.reset();
                         gc2.removeGeoJsonStore(st);
-                    }
-                    catch (e) {
+                    } catch (e) {
 
                     }
                 });
@@ -191,7 +195,7 @@ $(document).ready(function () {
                         onLoad: function () {
                             var layerObj = qstore[this.id], out = [], source = {}, pkeyValue;
                             isEmpty = layerObj.isEmpty();
-                            if ((!isEmpty)) {
+                            if (!isEmpty) {
                                 queryWin.show();
                                 $.each(layerObj.geoJSON.features, function (i, feature) {
                                     $.each(feature.properties, function (name, property) {
@@ -234,8 +238,7 @@ $(document).ready(function () {
                                                                 });
                                                                 return false;
 
-                                                            }
-                                                            else {
+                                                            } else {
                                                                 var filter = new OpenLayers.Filter.Comparison({
                                                                     type: OpenLayers.Filter.Comparison.EQUAL_TO,
                                                                     property: "\"" + pkey + "\"",
@@ -269,8 +272,7 @@ $(document).ready(function () {
                             if (!hit) {
                                 try {
                                     queryWin.hide();
-                                }
-                                catch (e) {
+                                } catch (e) {
                                 }
                             }
                             count++;
@@ -285,9 +287,8 @@ $(document).ready(function () {
                             sql = sql + " AND gc2_version_end_date IS NULL";
                         }
                         sql = sql + " ORDER BY round(ST_Distance(ST_Transform(\"" + f_geometry_column + "\",3857), ST_GeomFromText('POINT(" + coords.x + " " + coords.y + ")',3857)))";
-                    }
-                    else {
-                        sql = "SELECT * FROM " + value + " WHERE ST_Intersects(ST_Transform(ST_geomfromtext('POINT(" + coords.x + " " + coords.y + ")',900913)," + srid + "),\"" + f_geometry_column + "\")";
+                    } else {
+                        sql = "SELECT * FROM " + value + " WHERE ST_Intersects(ST_Transform(ST_geomfromtext('POINT(" + coords.x + " " + coords.y + ")',3857)," + srid + "),\"" + f_geometry_column + "\")";
                         if (versioning) {
                             sql = sql + " AND gc2_version_end_date IS NULL";
                         }
@@ -396,7 +397,7 @@ $(document).ready(function () {
                         y: 175
                     });
                 }
-                if (typeof(objRef) === "object") {
+                if (typeof (objRef) === "object") {
                     searchWin.show(objRef);
                 } else {
                     searchWin.show();
@@ -417,14 +418,13 @@ $(document).ready(function () {
                             var dest = new Proj4js.Proj(d);
                             p = new Proj4js.Point(lat, lon);
                             Proj4js.transform(source, dest, p);
-                        }
-                        else {
+                        } else {
                             p.x = null;
                             p.y = null;
                         }
                         return p;
                     };
-                    var p = transformPoint(place.geometry.location.lng(), place.geometry.location.lat(), "EPSG:4326", "EPSG:900913");
+                    var p = transformPoint(place.geometry.location.lng(), place.geometry.location.lat(), "EPSG:4326", "EPSG:3857");
                     var point = new OpenLayers.LonLat(p.x, p.y);
                     map.setCenter(point, 17);
                     try {
@@ -497,8 +497,7 @@ $(document).ready(function () {
                 extentRestricted = this.pressed;
                 if (extentRestricted) {
                     extentRestrictLayer.addFeatures(new OpenLayers.Feature.Vector(cloud.map.getExtent().toGeometry()));
-                }
-                else {
+                } else {
                     extentRestrictLayer.destroyFeatures();
                 }
                 Ext.Ajax.request({
@@ -735,7 +734,6 @@ $(document).ready(function () {
      * @type {Ext.grid.EditorGridPanel}
      */
     var grid = new Ext.grid.EditorGridPanel({
-        //plugins: [editor],
         store: store,
         viewConfig: {
             forceFit: true,
@@ -848,12 +846,18 @@ $(document).ready(function () {
                     }
                 },
                 {
-                    header: (window.gc2Options.extraLayerPropertyName !== null && window.gc2Options.extraLayerPropertyName[screenName]) ? window.gc2Options.extraLayerPropertyName[screenName] : "Extra",
+                    header: (window.gc2Options.extraLayerPropertyName !== null && window.gc2Options.extraLayerPropertyName[parentdb]) ? window.gc2Options.extraLayerPropertyName[parentdb] : "Extra",
                     dataIndex: "extra",
                     sortable: true,
                     width: 60,
-                    hidden: (window.gc2Options.showExtraLayerProperty !== null && window.gc2Options.showExtraLayerProperty[screenName] === true) ? false : true
+                    hidden: (window.gc2Options.showExtraLayerProperty !== null && window.gc2Options.showExtraLayerProperty[parentdb] === true) ? false : true
 
+                },
+                {
+                    xtype: 'checkcolumn',
+                    header: __("OWS"),
+                    dataIndex: 'enableows',
+                    width: 30
                 },
                 {
                     header: __("Sort id"),
@@ -899,7 +903,7 @@ $(document).ready(function () {
                     xtype: 'checkcolumn',
                     header: __("Skip conflict"),
                     dataIndex: 'skipconflict',
-                    hidden: (window.gc2Options.showConflictOptions !== null && window.gc2Options.showConflictOptions[screenName] === true) ? false : true,
+                    hidden: (window.gc2Options.showConflictOptions !== null && window.gc2Options.showConflictOptions[parentdb] === true) ? false : true,
                     width: 40
                 }
             ]
@@ -954,7 +958,7 @@ $(document).ready(function () {
                                             width: 300,
                                             height: 300
                                         });
-                                        privilgesWin.close();
+                                        privilegesWin.close();
                                     }
                                 }
                             }
@@ -962,8 +966,8 @@ $(document).ready(function () {
                         autoSave: true
                     });
                     privilegesStore.load();
-                    var privilgesWin = new Ext.Window({
-                        title: '<i class="fa fa-user"></i> ' + __("Grant privileges to sub-users on") + " '" + records[0].get("f_table_name") + "'",
+                    const privilegesWin = new Ext.Window({
+                        title: '<i class="fa fa-user"></i> ' + __("Grant privileges to sub-users on") + " '" + records.map(k => k.get("f_table_name")).join(', ') + "'",
                         modal: true,
                         width: 600,
                         height: 330,
@@ -972,12 +976,24 @@ $(document).ready(function () {
                         border: false,
                         layout: 'border',
                         items: [
-                            new Ext.Panel({
+                            {
+                                xtype: 'panel',
                                 height: 500,
                                 region: "center",
                                 layout: 'border',
                                 border: false,
                                 items: [
+                                    {
+                                        xtype: 'panel',
+                                        border: false,
+                                        region: 'north',
+                                        bodyStyle: {
+                                            padding: '7px'
+                                        },
+                                        html: "<i class='fa fa-exclamation-circle'></i> " + __("Multiple layers are selected. Any changes will effect all selected layers."),
+                                        hidden: records.length === 1
+
+                                    },
                                     new Ext.grid.EditorGridPanel({
                                         store: privilegesStore,
                                         viewConfig: {
@@ -991,7 +1007,8 @@ $(document).ready(function () {
                                         }),
                                         cm: new Ext.grid.ColumnModel({
                                             defaults: {
-                                                sortable: true
+                                                sortable: true,
+                                                menuDisabled: true
                                             },
                                             columns: [
                                                 {
@@ -1005,17 +1022,20 @@ $(document).ready(function () {
                                                     dataIndex: 'privileges',
                                                     sortable: false,
                                                     renderer: function (val, cell, record, rowIndex, colIndex, store) {
-                                                        var _key_ = records[0].get("_key_"), disabled;
-                                                        if (typeof subUserGroups[record.data.subuser] === "undefined" || subUserGroups[record.data.subuser] === "") {
+                                                        const _key_ = records.map(k => k.get("_key_")).join(',');
+                                                        const multiple = records.length > 1;
+                                                        let disabled;
+                                                        if (!record.data.group) {
                                                             disabled = "";
                                                         } else {
-                                                            disabled = "disabled";
+                                                            // disabled = "disabled";
+                                                            disabled = "";
                                                         }
                                                         var retval =
-                                                            '<input ' + disabled + ' data-key="' + _key_ + '" data-subuser="' + record.data.subuser + '" onclick="updatePrivileges(this.getAttribute(\'data-subuser\'),this.getAttribute(\'data-key\'),this.value)" type="radio" value="none" name="' + rowIndex + '"' + ((val === 'none') ? ' checked="checked"' : '') + '>&nbsp;' + __('None') + '&nbsp;&nbsp;&nbsp;' +
-                                                            '<input ' + disabled + ' data-key="' + _key_ + '" data-subuser="' + record.data.subuser + '" onclick="updatePrivileges(this.getAttribute(\'data-subuser\'),this.getAttribute(\'data-key\'),this.value)" type="radio" value="read" name="' + rowIndex + '"' + ((val === 'read') ? ' checked="checked"' : '') + '>&nbsp;' + __('Only read') + '&nbsp;&nbsp;&nbsp;' +
-                                                            '<input ' + disabled + ' data-key="' + _key_ + '" data-subuser="' + record.data.subuser + '" onclick="updatePrivileges(this.getAttribute(\'data-subuser\'),this.getAttribute(\'data-key\'),this.value)" type="radio" value="write" name="' + rowIndex + '"' + ((val === 'write') ? ' checked="checked"' : '') + '>&nbsp;' + __('Read and write') + '&nbsp;&nbsp;&nbsp;' +
-                                                            '<input ' + disabled + ' data-key="' + _key_ + '" data-subuser="' + record.data.subuser + '" onclick="updatePrivileges(this.getAttribute(\'data-subuser\'),this.getAttribute(\'data-key\'),this.value)" type="radio" value="all" name="' + rowIndex + '"' + ((val === 'all') ? ' checked="checked"' : '') + '>&nbsp;' + __('All') + '&nbsp;&nbsp;&nbsp;'
+                                                            '<input ' + disabled + ' data-key="' + _key_ + '" data-subuser="' + record.data.subuser + '" onclick="updatePrivileges(this.getAttribute(\'data-subuser\'),this.getAttribute(\'data-key\'),this.value)" type="radio" value="none" name="' + rowIndex + '"' + ((val === 'none' && !multiple) ? ' checked="checked"' : '') + '>&nbsp;' + __('None') + '&nbsp;&nbsp;&nbsp;' +
+                                                            '<input ' + disabled + ' data-key="' + _key_ + '" data-subuser="' + record.data.subuser + '" onclick="updatePrivileges(this.getAttribute(\'data-subuser\'),this.getAttribute(\'data-key\'),this.value)" type="radio" value="read" name="' + rowIndex + '"' + ((val === 'read' && !multiple) ? ' checked="checked"' : '') + '>&nbsp;' + __('Only read') + '&nbsp;&nbsp;&nbsp;' +
+                                                            '<input ' + disabled + ' data-key="' + _key_ + '" data-subuser="' + record.data.subuser + '" onclick="updatePrivileges(this.getAttribute(\'data-subuser\'),this.getAttribute(\'data-key\'),this.value)" type="radio" value="write" name="' + rowIndex + '"' + ((val === 'write' && !multiple) ? ' checked="checked"' : '') + '>&nbsp;' + __('Read and write') + '&nbsp;&nbsp;&nbsp;' +
+                                                            '<input ' + disabled + ' data-key="' + _key_ + '" data-subuser="' + record.data.subuser + '" onclick="updatePrivileges(this.getAttribute(\'data-subuser\'),this.getAttribute(\'data-key\'),this.value)" type="radio" value="all" name="' + rowIndex + '"' + ((val === 'all' && !multiple) ? ' checked="checked"' : '') + '>&nbsp;' + __('All') + '&nbsp;&nbsp;&nbsp;'
                                                         ;
                                                         return retval;
                                                     }
@@ -1026,21 +1046,22 @@ $(document).ready(function () {
                                                     editable: false,
                                                     width: 50,
                                                     renderer: function (val, cell, record, rowIndex, colIndex, store) {
-                                                        if (typeof subUserGroups[record.data.subuser] !== "undefined" && subUserGroups[record.data.subuser] !== "") {
-                                                            return subUserGroups[record.data.subuser];
+                                                        if (record.data.group) {
+                                                            return record.data.group;
                                                         }
                                                     }
                                                 }
                                             ]
                                         })
                                     }),
-                                    new Ext.Panel({
-                                            border: false,
-                                            region: "south",
-                                            bodyStyle: {
-                                                padding: '7px'
-                                            },
-                                            html: "<ul>" +
+                                    {
+                                        xtype: 'panel',
+                                        border: false,
+                                        region: "south",
+                                        bodyStyle: {
+                                            padding: '7px'
+                                        },
+                                        html: "<ul>" +
                                             "<li>" + "<b>" + __("None") + "</b>: " + __("The layer doesn't exist for the sub-user.") + "</li>" +
                                             "<li>" + "<b>" + __("Only read") + "</b>: " + __("The sub-user can see and query the layer.") + "</li>" +
                                             "<li>" + "<b>" + __("Read and write") + "</b>: " + __("The sub-user can edit the layer.") + "</li>" +
@@ -1052,15 +1073,13 @@ $(document).ready(function () {
                                             "<br><p>" +
                                             __("The privileges are granted for both Admin and external services like WMS and WFS.") +
                                             "</p>"
-                                        }
-                                    )
+                                    }
                                 ]
-
-                            })
+                            }
                         ]
                     }).show();
                 },
-                disabled: true
+                disabled: false
             },
             {
                 text: '<i class="fa fa-users"></i> ' + __('Workflow'),
@@ -1208,13 +1227,13 @@ $(document).ready(function () {
                                                                         padding: '7px'
                                                                     },
                                                                     html: "<ul>" +
-                                                                    "<li>" + "<b>" + __("None") + "</b>: " + __("The layer doesn't exist for the sub-user.") + "</li>" +
-                                                                    "<li>" + "<b>" + __("Only read") + "</b>: " + __("The sub-user can see and query the layer.") + "</li>" +
-                                                                    "<li>" + "<b>" + __("Read and write") + "</b>: " + __("The sub-user can edit the layer.") + "</li>" +
-                                                                    "<ul>" +
-                                                                    "<br><p>" +
-                                                                    __("The privileges are granted for both Admin and external services like WMS and WFS.") +
-                                                                    "</p>"
+                                                                        "<li>" + "<b>" + __("None") + "</b>: " + __("The layer doesn't exist for the sub-user.") + "</li>" +
+                                                                        "<li>" + "<b>" + __("Only read") + "</b>: " + __("The sub-user can see and query the layer.") + "</li>" +
+                                                                        "<li>" + "<b>" + __("Read and write") + "</b>: " + __("The sub-user can edit the layer.") + "</li>" +
+                                                                        "<ul>" +
+                                                                        "<br><p>" +
+                                                                        __("The privileges are granted for both Admin and external services like WMS and WFS.") +
+                                                                        "</p>"
                                                                 }
                                                             )
                                                         ]
@@ -1225,7 +1244,7 @@ $(document).ready(function () {
                                             workflowStore.load();
                                         };
                                         if (!r.exists) {
-                                            Ext.MessageBox.confirm(__('Confirm'), __("You are about to .....") + " '" + records[0].get("f_table_name") + "'. " + __("Are you sure?"), function (btn) {
+                                            Ext.MessageBox.confirm(__('Confirm'), __("Enable workflow on") + " '" + records[0].get("f_table_name") + "'. " + __("Are you sure?"), function (btn) {
                                                 if (btn === "yes") {
                                                     Ext.Ajax.request({
                                                         url: '/controllers/table/workflow/' + records[0].get("f_table_schema") + "." + records[0].get("f_table_name"),
@@ -1301,195 +1320,193 @@ $(document).ready(function () {
                             frame: false,
                             border: false,
                             layout: 'border',
-                            items: [new Ext.FormPanel({
-                                labelWidth: 100,
-                                // label settings here cascade unless overridden
-                                frame: false,
-                                border: false,
-                                region: 'center',
-                                viewConfig: {
-                                    forceFit: true
-                                },
-                                id: "detailform",
-                                bodyStyle: 'padding: 10px 10px 0 10px;',
+                            items: [
+                                new Ext.FormPanel({
+                                    labelWidth: 100,
+                                    // label settings here cascade unless overridden
+                                    frame: false,
+                                    border: false,
+                                    region: 'center',
+                                    viewConfig: {
+                                        forceFit: true
+                                    },
+                                    id: "detailform",
+                                    bodyStyle: 'padding: 10px 10px 0 10px;',
 
-                                items: [
-                                    {
-                                        xtype: 'fieldset',
-                                        title: __('Settings'),
-                                        defaults: {
-                                            anchor: '100%'
-                                        },
-                                        items: [
-                                            {
-                                                name: '_key_',
-                                                xtype: 'hidden',
-                                                value: r.data._key_
+                                    items: [
+                                        {
+                                            xtype: 'fieldset',
+                                            title: __('Settings'),
+                                            defaults: {
+                                                anchor: '100%'
                                             },
-                                            {
-                                                xtype: 'textfield',
-                                                fieldLabel: __('Meta data URL'),
-                                                name: 'meta_url',
-                                                value: r.data.meta_url
-                                            },
-                                            {
-                                                xtype: 'textfield',
-                                                fieldLabel: __('WMS source'),
-                                                name: 'wmssource',
-                                                value: r.data.wmssource
-                                            },
-                                            {
-                                                xtype: 'textfield',
-                                                fieldLabel: __('WMS EPSGs'),
-                                                name: 'wmsclientepsgs',
-                                                value: r.data.wmsclientepsgs
-                                            },
-                                            {
-                                                xtype: 'combo',
-                                                store: new Ext.data.ArrayStore({
-                                                    fields: ['name', 'value'],
-                                                    data: [
-                                                        ['true', true],
-                                                        ['false', false]
-                                                    ]
-                                                }),
-                                                displayField: 'name',
-                                                valueField: 'value',
-                                                mode: 'local',
-                                                typeAhead: false,
-                                                editable: false,
-                                                triggerAction: 'all',
-                                                name: 'not_querable',
-                                                fieldLabel: __('Not queryable'),
-                                                value: r.data.not_querable
-                                            },
-                                            {
-                                                xtype: 'combo',
-                                                store: new Ext.data.ArrayStore({
-                                                    fields: ['name', 'value'],
-                                                    data: [
-                                                        ['true', true],
-                                                        ['false', false]
-                                                    ]
-                                                }),
-                                                displayField: 'name',
-                                                valueField: 'value',
-                                                mode: 'local',
-                                                typeAhead: false,
-                                                editable: false,
-                                                triggerAction: 'all',
-                                                name: 'baselayer',
-                                                fieldLabel: 'Is baselayer',
-                                                value: r.data.baselayer
-                                            },
-                                            {
-                                                xtype: 'textfield',
-                                                fieldLabel: __('SQL where clause'),
-                                                name: 'filter',
-                                                value: r.data.filter
-                                            },
-                                            {
-                                                xtype: 'textfield',
-                                                fieldLabel: __('File source'),
-                                                name: 'bitmapsource',
-                                                value: r.data.bitmapsource
-                                            },
-                                            {
-                                                xtype: 'combo',
-                                                store: new Ext.data.ArrayStore({
-                                                    fields: ['name', 'value'],
-                                                    data: [
-                                                        ['true', true],
-                                                        ['false', false]
-                                                    ]
-                                                }),
-                                                displayField: 'name',
-                                                valueField: 'value',
-                                                mode: 'local',
-                                                typeAhead: false,
-                                                editable: false,
-                                                triggerAction: 'all',
-                                                name: 'enablesqlfilter',
-                                                fieldLabel: 'Enable sql filtering in Viewer',
-                                                value: r.data.enablesqlfilter
-                                            },
-                                            {
-                                                xtype: 'textfield',
-                                                fieldLabel: __('ES trigger table'),
-                                                name: 'triggertable',
-                                                value: r.data.triggertable
-                                            },
-                                            {
-                                                xtype: 'textfield',
-                                                fieldLabel: __('Feature id'),
-                                                name: 'featureid',
-                                                value: r.data.featureid
-                                            },
-                                            {
-                                                xtype: 'textarea',
-                                                height: 100,
-                                                fieldLabel: __('View definition'),
-                                                name: 'viewdefinition',
-                                                value: r.json.viewdefinition || r.json.matviewdefinition,
-                                                disabled: true
-                                            }]
-                                    }
-                                ],
-                                buttons: [
-                                    {
-                                        text: '<i class="fa fa-check"></i> ' + __('Update'),
-                                        handler: function () {
-                                            var f = Ext.getCmp('detailform');
-                                            if (f.form.isValid()) {
-                                                var values = f.form.getValues();
-
-                                                for (var key in values) {
-                                                    if (values.hasOwnProperty(key)) {
-                                                        values[key] = encodeURIComponent(values[key]);
-                                                    }
+                                            items: [
+                                                {
+                                                    name: '_key_',
+                                                    xtype: 'hidden',
+                                                    value: r.data._key_
+                                                },
+                                                {
+                                                    xtype: 'textfield',
+                                                    fieldLabel: __('Meta data URL'),
+                                                    name: 'meta_url',
+                                                    value: r.data.meta_url
+                                                },
+                                                {
+                                                    xtype: 'textfield',
+                                                    fieldLabel: __('WMS source'),
+                                                    name: 'wmssource',
+                                                    value: r.data.wmssource
+                                                },
+                                                {
+                                                    xtype: 'textfield',
+                                                    fieldLabel: __('WMS EPSGs'),
+                                                    name: 'wmsclientepsgs',
+                                                    value: r.data.wmsclientepsgs
+                                                },
+                                                {
+                                                    xtype: 'combo',
+                                                    store: new Ext.data.ArrayStore({
+                                                        fields: ['name', 'value'],
+                                                        data: [
+                                                            ['true', true],
+                                                            ['false', false]
+                                                        ]
+                                                    }),
+                                                    displayField: 'name',
+                                                    valueField: 'value',
+                                                    mode: 'local',
+                                                    typeAhead: false,
+                                                    editable: false,
+                                                    triggerAction: 'all',
+                                                    name: 'not_querable',
+                                                    fieldLabel: __('Not queryable'),
+                                                    value: r.data.not_querable
+                                                },
+                                                {
+                                                    xtype: 'combo',
+                                                    store: new Ext.data.ArrayStore({
+                                                        fields: ['name', 'value'],
+                                                        data: [
+                                                            ['true', true],
+                                                            ['false', false]
+                                                        ]
+                                                    }),
+                                                    displayField: 'name',
+                                                    valueField: 'value',
+                                                    mode: 'local',
+                                                    typeAhead: false,
+                                                    editable: false,
+                                                    triggerAction: 'all',
+                                                    name: 'baselayer',
+                                                    fieldLabel: 'Is baselayer',
+                                                    value: r.data.baselayer
+                                                },
+                                                {
+                                                    xtype: 'textfield',
+                                                    fieldLabel: __('SQL where clause'),
+                                                    name: 'filter',
+                                                    value: r.data.filter
+                                                },
+                                                {
+                                                    xtype: 'textfield',
+                                                    fieldLabel: __('File source'),
+                                                    name: 'bitmapsource',
+                                                    value: r.data.bitmapsource
+                                                },
+                                                {
+                                                    xtype: 'combo',
+                                                    store: new Ext.data.ArrayStore({
+                                                        fields: ['name', 'value'],
+                                                        data: [
+                                                            ['true', true],
+                                                            ['false', false]
+                                                        ]
+                                                    }),
+                                                    displayField: 'name',
+                                                    valueField: 'value',
+                                                    mode: 'local',
+                                                    typeAhead: false,
+                                                    editable: false,
+                                                    triggerAction: 'all',
+                                                    name: 'enablesqlfilter',
+                                                    fieldLabel: 'Enable sql filtering in Viewer',
+                                                    value: r.data.enablesqlfilter
+                                                },
+                                                {
+                                                    xtype: 'textfield',
+                                                    fieldLabel: __('ES trigger table'),
+                                                    name: 'triggertable',
+                                                    value: r.data.triggertable
+                                                },
+                                                {
+                                                    xtype: 'textfield',
+                                                    fieldLabel: __('Feature id'),
+                                                    name: 'featureid',
+                                                    value: r.data.featureid
+                                                },
+                                                {
+                                                    xtype: 'textarea',
+                                                    fieldLabel: __('QML'),
+                                                    name: 'qml',
+                                                    value: r.data.qml
+                                                },
+                                                {
+                                                    xtype: 'textarea',
+                                                    height: 100,
+                                                    fieldLabel: __('View definition'),
+                                                    name: 'viewdefinition',
+                                                    value: r.json.viewdefinition || r.json.matviewdefinition,
+                                                    disabled: true
+                                                }]
+                                        }
+                                    ],
+                                    buttons: [
+                                        {
+                                            text: '<i class="fa fa-check"></i> ' + __('Update'),
+                                            handler: function () {
+                                                var f = Ext.getCmp('detailform');
+                                                if (f.form.isValid()) {
+                                                    var values = f.form.getValues();
+                                                    var param = {
+                                                        data: values
+                                                    };
+                                                    param = Ext.util.JSON.encode(param);
+                                                    Ext.Ajax.request({
+                                                        url: '/controllers/layer/records/_key_',
+                                                        method: 'put',
+                                                        headers: {
+                                                            'Content-Type': 'application/json; charset=utf-8'
+                                                        },
+                                                        params: param,
+                                                        success: function () {
+                                                            //TODO deselect/select
+                                                            grid.getSelectionModel().clearSelections();
+                                                            store.reload();
+                                                            groupsStore.load();
+                                                            App.setAlert(App.STATUS_NOTICE, __("Settings updated"));
+                                                        },
+                                                        failure: function (response) {
+                                                            Ext.MessageBox.show({
+                                                                title: 'Failure',
+                                                                msg: __(Ext.decode(response.responseText).message),
+                                                                buttons: Ext.MessageBox.OK,
+                                                                width: 400,
+                                                                height: 300,
+                                                                icon: Ext.MessageBox.ERROR
+                                                            });
+                                                        }
+                                                    });
+                                                } else {
+                                                    var s = '';
+                                                    Ext.iterate(f.form.getValues(), function (key, value) {
+                                                        s += String.format("{0} = {1}<br />", key, value);
+                                                    }, this);
                                                 }
-
-                                                var param = {
-                                                    data: values
-                                                };
-                                                param = Ext.util.JSON.encode(param);
-                                                Ext.Ajax.request({
-                                                    url: '/controllers/layer/records/_key_',
-                                                    method: 'put',
-                                                    headers: {
-                                                        'Content-Type': 'application/json; charset=utf-8'
-                                                    },
-                                                    params: param,
-                                                    success: function () {
-                                                        //TODO deselect/select
-                                                        grid.getSelectionModel().clearSelections();
-                                                        store.reload();
-                                                        groupsStore.load();
-                                                        App.setAlert(App.STATUS_NOTICE, __("Settings updated"));
-                                                        winMoreSettings.close();
-                                                    },
-                                                    failure: function (response) {
-                                                        winMoreSettings.close();
-                                                        Ext.MessageBox.show({
-                                                            title: 'Failure',
-                                                            msg: __(Ext.decode(response.responseText).message),
-                                                            buttons: Ext.MessageBox.OK,
-                                                            width: 400,
-                                                            height: 300,
-                                                            icon: Ext.MessageBox.ERROR
-                                                        });
-                                                    }
-                                                });
-                                            } else {
-                                                var s = '';
-                                                Ext.iterate(f.form.getValues(), function (key, value) {
-                                                    s += String.format("{0} = {1}<br />", key, value);
-                                                }, this);
                                             }
                                         }
-                                    }
-                                ]
-                            })]
+                                    ]
+                                })]
                         })]
                     });
                     winMoreSettings.show(this);
@@ -1638,7 +1655,7 @@ $(document).ready(function () {
                                             xtype: "checkbox",
                                             fieldLabel: __("Append"),
                                             name: "append",
-                                            checked:  records.length > 1,
+                                            checked: records.length > 1,
                                             disabled: records.length === 1
                                         }
                                     ],
@@ -1664,7 +1681,7 @@ $(document).ready(function () {
                                                     };
                                                     param = Ext.util.JSON.encode(param);
                                                     Ext.Ajax.request({
-                                                        url: '/controllers/layer/records/_key_/' + (values.append ? "1":"0"),
+                                                        url: '/controllers/layer/records/_key_/' + (values.append ? "1" : "0"),
                                                         method: 'put',
                                                         headers: {
                                                             'Content-Type': 'application/json; charset=utf-8'
@@ -1769,6 +1786,29 @@ $(document).ready(function () {
                                                         items: (function () {
                                                             Ext.each(w.fields, function (v) {
                                                                 switch (v.type) {
+                                                                    case "checkboxgroup":
+                                                                        var values = ((records.length === 1 && Ext.decode(records[0].data.meta) !== null) ? (Ext.decode(records[0].data.meta)[v.name] || v.default) : '').split(',');
+                                                                        var items = [];
+                                                                        v.values.map(function (item) {
+                                                                            items.push({
+                                                                                boxLabel: item.name,
+                                                                                name: v.name,
+                                                                                inputValue: item.value,
+                                                                                checked: (values.indexOf(item.value) > -1)
+                                                                            });
+                                                                        });
+
+                                                                        fields.push({
+                                                                            xtype: 'checkboxgroup',
+                                                                            fieldLabel: v.title,
+                                                                            name: v.name,
+                                                                            vertical: true,
+                                                                            columns: 2,
+                                                                            allowBlank: false,
+                                                                            items: items,
+                                                                        });
+
+                                                                        break;
                                                                     case "text":
                                                                         fields.push(
                                                                             {
@@ -1856,20 +1896,30 @@ $(document).ready(function () {
 
 
                                                 })
-
                                                 return fieldsets;
-
-
                                             }()),
 
                                             buttons: [
                                                 {
                                                     text: '<i class="fa fa-check"></i> ' + __('Update'),
                                                     handler: function () {
-
                                                         var f = Ext.getCmp('metaform');
                                                         if (f.form.isValid()) {
                                                             var values = f.form.getFieldValues();
+                                                            // Check for checkboxgroup type and join values to string
+                                                            for (var key in values) {
+                                                                var value = values[key];
+                                                                if (values.hasOwnProperty(key)) {
+                                                                    if (typeof value === "object") {
+                                                                        console.log(value)
+                                                                        var tmp = [];
+                                                                        Ext.iterate(value, function (v) {
+                                                                            tmp.push(v.inputValue)
+                                                                        });
+                                                                        values[key] = tmp.join(",");
+                                                                    }
+                                                                }
+                                                            }
                                                             var data = [];
                                                             Ext.iterate(records, function (v) {
                                                                 data.push(
@@ -1894,7 +1944,6 @@ $(document).ready(function () {
                                                                     grid.getSelectionModel().clearSelections();
                                                                     store.reload();
                                                                     App.setAlert(App.STATUS_NOTICE, __("Meta data updated"));
-                                                                    win.close();
                                                                 },
                                                                 failure: function (response) {
                                                                     Ext.MessageBox.show({
@@ -1926,7 +1975,7 @@ $(document).ready(function () {
             },
             {
                 text: '<i class="fa fa-remove"></i> ' + __('Clear tile cache'),
-                disabled: (subUser === schema || subUser === false) ? false : true,
+                disabled: (screenName === schema || subUser === false) ? false : true,
                 handler: function () {
                     Ext.MessageBox.confirm(__('Confirm'), __('You are about to delete the tile cache for the whole schema. Are you sure?'), function (btn) {
                         if (btn === "yes") {
@@ -1939,6 +1988,7 @@ $(document).ready(function () {
                                 success: function () {
                                     store.reload();
                                     App.setAlert(App.STATUS_OK, __("Tile cache deleted"));
+                                    writeMapCacheFile();
                                 },
                                 failure: function (response) {
                                     Ext.MessageBox.show({
@@ -1960,7 +2010,7 @@ $(document).ready(function () {
             '->',
             {
                 text: '<i class="fa fa-plus-circle"></i> ' + __('New layer'),
-                disabled: (subUser === schema || subUser === false) ? false : true,
+                disabled: (screenName === schema || subUser === false) ? false : true,
                 handler: function () {
                     onAdd();
                 }
@@ -1980,8 +2030,8 @@ $(document).ready(function () {
                         title: '<i class="fa fa-arrow-right"></i> ' + __("Move") + " " + records.length + " " + __("selected to another schema"),
                         modal: true,
                         layout: 'fit',
-                        width: 270,
-                        height: 80,
+                        width: 300,
+                        height: 67,
                         closeAction: 'close',
                         plain: true,
                         border: false,
@@ -2012,7 +2062,7 @@ $(document).ready(function () {
                                                         triggerAction: 'all',
                                                         value: schema,
                                                         name: 'schema',
-                                                        width: 150
+                                                        width: 200
                                                     }
                                                 ]
                                             }
@@ -2102,7 +2152,7 @@ $(document).ready(function () {
                         modal: true,
                         layout: 'fit',
                         width: 270,
-                        height: 80,
+                        height: 67,
                         closeAction: 'close',
                         plain: true,
                         border: false,
@@ -2257,35 +2307,208 @@ $(document).ready(function () {
                 tooltip: __("Copy all properties from another layer"),
                 disabled: true,
                 handler: function () {
-                    var record = grid.getSelectionModel().getSelected();
-                    if (!record) {
+                    var records = grid.getSelectionModel().getSelections();
+                    if (records.length === 0) {
                         App.setAlert(App.STATUS_NOTICE, __("You've to select a layer"));
                         return false;
                     }
-                    var winCopyMeta = new Ext.Window({
+                    new Ext.Window({
                         title: '<i class="fa fa-copy"></i> ' + __("Copy all properties from another layer"),
                         modal: true,
                         layout: 'fit',
-                        width: 350,
-                        height: 120,
+                        width: 450,
+                        height: 470,
                         closeAction: 'close',
                         plain: true,
                         border: false,
                         items: [
                             {
-                                defaults: {
-                                    border: false
-                                },
+                                xtype: 'form',
+                                labelWidth: 100,
+                                // label settings here cascade unless overridden
+                                frame: false,
                                 border: false,
+                                region: 'center',
+                                viewConfig: {
+                                    forceFit: true
+                                },
+                                id: "copyMetaForm",
+                                bodyStyle: 'padding: 10px 10px 0 10px;',
+
                                 items: [
                                     {
-                                        xtype: "form",
-                                        id: "copyMetaForm",
-                                        layout: 'hbox',
-                                        bodyStyle: 'padding: 10px',
+                                        xtype: 'fieldset',
+                                        title: __('What to copy'),
+                                        checkboxToggle: false,
+                                        collapsed: false,
+                                        defaults: {
+                                            anchor: '100%'
+                                        },
+                                        items: [
+                                            {
+                                                xtype: 'container',
+                                                layout: 'column',
+
+                                                items: [
+                                                    {
+                                                        columnWidth: .5,
+                                                        layout: 'form',
+                                                        items: [
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Title'),
+                                                                name: 'f_table_title',
+                                                                checked: true
+                                                            }, {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Description'),
+                                                                name: 'f_table_abstract',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Note'),
+                                                                name: 'note',
+                                                                checked: true
+                                                            }, {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Group'),
+                                                                name: 'layergroup',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('OWS'),
+                                                                name: 'enableows',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Sort id'),
+                                                                name: 'sort_id',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Authentication'),
+                                                                name: 'authentication',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('WMS source'),
+                                                                name: 'wmssource',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('WMS EPSGs'),
+                                                                name: 'wmsclientepsgs',
+                                                                checked: true
+                                                            },
+                                                        ]
+                                                    },
+                                                    {
+                                                        columnWidth: .5,
+                                                        layout: 'form',
+                                                        items: [
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Editable'),
+                                                                name: 'editable',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Field settings'),
+                                                                name: 'fieldconf',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Layers definition'),
+                                                                name: 'def',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Classes'),
+                                                                name: 'class',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Privileges'),
+                                                                name: 'privileges',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Meta'),
+                                                                name: 'meta',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Tile cache'),
+                                                                name: 'tilecache',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Bitmap source'),
+                                                                name: 'bitmapsource',
+                                                                checked: true
+                                                            },
+                                                            {
+                                                                xtype: 'checkbox',
+                                                                fieldLabel: __('Tags'),
+                                                                name: 'tags',
+                                                                checked: true
+                                                            },
+                                                        ]
+                                                    },
+                                                ]
+                                            },
+                                            {
+                                                xtype: 'container',
+                                                layout: 'hbox',
+                                                items: [
+                                                    {
+                                                        xtype: 'button',
+                                                        text: __('All off'),
+                                                        handler: function () {
+                                                            Ext.each(Ext.getCmp('copyMetaForm').findByType('checkbox'), function (chk) {
+                                                                chk.setValue(false);
+                                                            });
+                                                        }
+                                                    },
+                                                    {xtype: 'spacer', width: 10},
+                                                    {
+                                                        xtype: 'button',
+                                                        text: __('All on'),
+                                                        handler: function () {
+                                                            Ext.each(Ext.getCmp('copyMetaForm').findByType('checkbox'), function (chk) {
+                                                                chk.setValue(true);
+                                                            });
+                                                        }
+                                                    },
+                                                ]
+                                            },
+                                        ]
+                                    },
+                                    {
+                                        xtype: 'fieldset',
+                                        title: __('Copy from'),
+                                        checkboxToggle: false,
+                                        collapsed: false,
+                                        defaults: {
+                                            anchor: '100%'
+                                        },
                                         items: [
                                             {
                                                 xtype: "combo",
+                                                fieldLabel: __('Schema'),
                                                 store: schemasStore,
                                                 displayField: 'schema',
                                                 editable: false,
@@ -2293,15 +2516,14 @@ $(document).ready(function () {
                                                 triggerAction: 'all',
                                                 lazyRender: true,
                                                 name: 'schema',
-                                                width: 150,
+                                                width: 200,
                                                 allowBlank: false,
-                                                emptyText: __('Schema'),
                                                 listeners: {
                                                     'select': function (combo, value, index) {
                                                         Ext.getCmp('copyMetaFormKeys').clearValue();
                                                         (function () {
                                                             Ext.Ajax.request({
-                                                                url: '/api/v1/meta/' + screenName + '/' + combo.getValue(),
+                                                                url: '/controllers/layer/records/' + combo.getValue(),
                                                                 method: 'GET',
                                                                 headers: {
                                                                     'Content-Type': 'application/json; charset=utf-8'
@@ -2325,8 +2547,10 @@ $(document).ready(function () {
                                                         }());
                                                     }
                                                 }
-                                            }, {
+                                            },
+                                            {
                                                 xtype: "combo",
+                                                fieldLabel: __('Layer'),
                                                 id: "copyMetaFormKeys",
                                                 store: new Ext.data.Store({
                                                     reader: new Ext.data.JsonReader({
@@ -2348,53 +2572,65 @@ $(document).ready(function () {
                                                 mode: 'local',
                                                 triggerAction: 'all',
                                                 name: 'key',
-                                                width: 150,
+                                                width: 300,
                                                 allowBlank: false,
-                                                emptyText: __('Layer')
-                                            }
+                                            },
 
                                         ]
                                     },
+                                ],
+                                buttons: [
                                     {
-                                        layout: 'form',
-                                        bodyStyle: 'padding: 10px',
-                                        items: [
-                                            {
-                                                xtype: 'button',
-                                                text: __('Copy'),
-                                                handler: function () {
-                                                    var f = Ext.getCmp('copyMetaForm');
-                                                    if (f.form.isValid()) {
-                                                        Ext.Ajax.request({
-                                                            url: '/controllers/layer/copymeta/' + record.data._key_ + "/" + Ext.getCmp('copyMetaFormKeys').value,
-                                                            method: 'put',
-                                                            headers: {
-                                                                'Content-Type': 'application/json; charset=utf-8'
-                                                            },
-                                                            success: function () {
-                                                                reLoadTree();
-                                                                App.setAlert(App.STATUS_OK, __("Layer properties copied"));
-                                                            },
-                                                            failure: function (response) {
-                                                                Ext.MessageBox.show({
-                                                                    title: __('Failure'),
-                                                                    msg: __(Ext.decode(response.responseText).message),
-                                                                    buttons: Ext.MessageBox.OK,
-                                                                    width: 400,
-                                                                    height: 300,
-                                                                    icon: Ext.MessageBox.ERROR
-                                                                });
-                                                            }
-                                                        });
-                                                    } else {
-                                                        var s = '';
-                                                        Ext.iterate(f.form.getValues(), function (key, value) {
-                                                            s += String.format("{0} = {1}<br />", key, value);
-                                                        }, this);
+                                        text: __('Copy'),
+                                        handler: function () {
+                                            var f = Ext.getCmp('copyMetaForm');
+                                            if (f.form.isValid()) {
+                                                var fields = [];
+                                                Ext.iterate(f.form.getValues(), function (key, value) {
+                                                    if (value === 'on') {
+                                                        fields.push(key)
                                                     }
-                                                }
+                                                })
+                                                var keys = [];
+                                                Ext.iterate(records, function (v) {
+                                                    keys.push(v.get("_key_"));
+                                                });
+                                                var param = {
+                                                    data: {
+                                                        keys,
+                                                        fields
+                                                    }
+                                                };
+                                                param = Ext.util.JSON.encode(param);
+                                                Ext.Ajax.request({
+                                                    url: '/controllers/layer/copymeta/' + Ext.getCmp('copyMetaFormKeys').value,
+                                                    method: 'put',
+                                                    headers: {
+                                                        'Content-Type': 'application/json; charset=utf-8'
+                                                    },
+                                                    params: param,
+                                                    success: function () {
+                                                        reLoadTree();
+                                                        App.setAlert(App.STATUS_OK, __("Layer properties copied"));
+                                                    },
+                                                    failure: function (response) {
+                                                        Ext.MessageBox.show({
+                                                            title: __('Failure'),
+                                                            msg: __(Ext.decode(response.responseText).message),
+                                                            buttons: Ext.MessageBox.OK,
+                                                            width: 400,
+                                                            height: 300,
+                                                            icon: Ext.MessageBox.ERROR
+                                                        });
+                                                    }
+                                                });
+                                            } else {
+                                                var s = '';
+                                                Ext.iterate(f.form.getValues(), function (key, value) {
+                                                    s += String.format("{0} = {1}<br />", key, value);
+                                                }, this);
                                             }
-                                        ]
+                                        }
                                     }
                                 ]
                             }
@@ -2473,7 +2709,7 @@ $(document).ready(function () {
                                                                         params: param,
                                                                         success: function (response) {
                                                                             var data = eval('(' + response.responseText + ')');
-                                                                            window.location = "/admin/" + screenName + "/" + data.data.name;
+                                                                            window.location = "/admin/" + parentdb + "/" + data.data.name;
                                                                         },
                                                                         failure: function (response) {
                                                                             winSchemaRename.close();
@@ -2515,7 +2751,7 @@ $(document).ready(function () {
                                                 'Content-Type': 'application/json; charset=utf-8'
                                             },
                                             success: function (response) {
-                                                window.location = "/admin/" + screenName + "/public";
+                                                window.location = "/admin/" + parentdb + "/public";
                                             },
                                             failure: function (response) {
                                                 Ext.MessageBox.show({
@@ -2671,7 +2907,7 @@ $(document).ready(function () {
             layout: 'fit',
             modal: true,
             width: 800,
-            height: 350,
+            height: 380,
             closeAction: 'close',
             resizable: false,
             border: false,
@@ -2760,13 +2996,26 @@ $(document).ready(function () {
             detailPanel = Ext.getCmp('detailPanel'),
             detailPanelTemplate = new Ext.Template(['<table border="0">' +
             '<tr class="x-grid3-row"><td class="bottom-info-bar-param"><b>' + __('Srid') + '</b></td><td >{srid}</td><td class="bottom-info-bar-pipe">|</td><td class="bottom-info-bar-param"><b>' + __('Key') + '</b></td><td >{_key_}</td><td class="bottom-info-bar-pipe">|</td><td class="bottom-info-bar-param"><b>' + __('Tags') + '</b></td><td>{tags}</td></tr>' +
-            '<tr class="x-grid3-row"><td class="bottom-info-bar-param"><b>' + __('Geom field') + '</b></td><td>{f_geometry_column}</td><td class="bottom-info-bar-pipe">|</td><td class="bottom-info-bar-param"><b>' + __('Created') + '</b></td><td>{created}</td><td class="bottom-info-bar-pipe">|</td></td><td class="bottom-info-bar-param"><b>' + __('Guid') + '</b></td><td>{uuid}</td></tr>' +
+            '<tr class="x-grid3-row"><td class="bottom-info-bar-param"><b>' + __('Geom field') + '</b></td><td>{f_geometry_column}</td><td class="bottom-info-bar-pipe">|</td><td class="bottom-info-bar-param"><b>' + __('Dimensions') + '</b></td><td>{coord_dimension}</td><td class="bottom-info-bar-pipe">|</td></td><td class="bottom-info-bar-param"><b>' + __('Guid') + '</b></td><td>{uuid}</td></tr>' +
             '</table>']);
         if (records.length === 1) {
-            detailPanelTemplate.overwrite(detailPanel.body, records[0].data);
+            var dataClone = JSON.parse(JSON.stringify(records[0].data));
+            var tagsStr = dataClone.tags;
+            var tagsArr = [];
+            var tagsPresent
+            if (typeof tagsStr === "string") {
+                tagsArr = JSON.parse(tagsStr);
+            }
+            if (tagsArr.length === 0) {
+                tagsPresent = __("No tags");
+            } else {
+                tagsPresent = tagsArr.join(", ");
+            }
+            dataClone.tags = tagsPresent;
+            detailPanelTemplate.overwrite(detailPanel.body, dataClone);
             tableStructure.grid = null;
             Ext.getCmp("tablepanel").activate(0);
-            tableStructure.init(records[0], screenName);
+            tableStructure.init(records[0], parentdb);
             s.removeAll();
             s.add(tableStructure.grid);
             s.doLayout();
@@ -2785,12 +3034,16 @@ $(document).ready(function () {
         Ext.getCmp("a6").removeAll();
         Ext.getCmp("a8").removeAll();
         Ext.getCmp("a9").removeAll();
-        Ext.getCmp("a10").removeAll();
-        Ext.getCmp("a11").removeAll();
         Ext.getCmp("a12").removeAll();
+        Ext.getCmp("a13").removeAll();
+        Ext.getCmp("a14").removeAll();
         Ext.getCmp("layerStylePanel").disable();
         Ext.getCmp("classTabs").disable();
 
+        const a7 = Ext.getCmp("a7");
+        a7.removeAll();
+        a7.add(classWizards.placeHolder());
+        a7.doLayout();
     };
 
     /**
@@ -2861,6 +3114,15 @@ $(document).ready(function () {
                     name: 'offsite'
                 },
                 {
+                    name: 'label_no_clip',
+                    type: 'boolean'
+
+                },
+                {
+                    name: 'polyline_no_clip',
+
+                },
+                {
                     name: 'bands'
                 },
                 {
@@ -2887,6 +3149,9 @@ $(document).ready(function () {
                 },
                 {
                     name: 'cache'
+                },
+                {
+                    name: 's3_tile_set'
                 }
 
             ],
@@ -2911,6 +3176,8 @@ $(document).ready(function () {
                                 "symbolscaledenom": store.getAt(0).data.symbolscaledenom,
                                 "geotype": store.getAt(0).data.geotype,
                                 "offsite": store.getAt(0).data.offsite,
+                                "label_no_clip": store.getAt(0).data.label_no_clip,
+                                "polyline_no_clip": store.getAt(0).data.polyline_no_clip,
                                 "bands": store.getAt(0).data.bands
                             });
                         }
@@ -2929,7 +3196,8 @@ $(document).ready(function () {
                                 "format": store.getAt(0).data.format,
                                 "lock": store.getAt(0).data.lock,
                                 "layers": store.getAt(0).data.layers,
-                                "cache": store.getAt(0).data.cache
+                                "cache": store.getAt(0).data.cache,
+                                "s3_tile_set": store.getAt(0).data.s3_tile_set
 
                             });
                         }
@@ -2999,20 +3267,22 @@ $(document).ready(function () {
         var a3 = Ext.getCmp("a3");
         var a8 = Ext.getCmp("a8");
         var a9 = Ext.getCmp("a9");
-        var a10 = Ext.getCmp("a10");
-        var a11 = Ext.getCmp("a11");
         a3.remove(wmsClass.grid);
         a8.remove(wmsClass.grid2);
         a9.remove(wmsClass.grid3);
-        a10.remove(wmsClass.grid4);
-        a11.remove(wmsClass.grid5);
         a3.doLayout();
         a8.doLayout();
         a9.doLayout();
-        a10.doLayout();
-        a11.doLayout();
 
         Ext.getCmp("layerStyleTabs").activate(activeTab);
+        var a13 = Ext.getCmp("a13");
+        a13.remove(wmsLayer.legendForm);
+        a13.add(wmsLayer.legendForm);
+        a13.doLayout();
+        var a14 = Ext.getCmp("a14");
+        a14.remove(wmsLayer.qmlForm);
+        a14.add(wmsLayer.qmlForm);
+        a14.doLayout();
         updateLegend();
     };
 
@@ -3104,42 +3374,8 @@ $(document).ready(function () {
                 record = row;
             }
         });
-        if (!record) {
-            App.setAlert(App.STATUS_NOTICE, __("You've to select a layer"));
-            return false;
-        }
-        new Ext.Window({
-            title: '<i class="fa fa-eye"></i> ' + __("Class wizard"),
-            layout: 'fit',
-            width: 700,
-            height: 540,
-            plain: true,
-            modal: true,
-            resizable: false,
-            draggable: true,
-            border: false,
-            closeAction: 'hide',
-            x: 3,
-            y: 32,
-            items: [
-                {
-                    xtype: "panel",
-                    border: false,
-                    defaults: {
-                        border: false
-                    },
-                    items: [
-                        {
-                            xtype: "panel",
-                            id: "a7",
-                            layout: "fit"
-                        }
-                    ]
-                }
-            ]
-        }).show();
         var a7 = Ext.getCmp("a7");
-        a7.remove(classWizards.quantile);
+        a7.removeAll();
         classWizards.init(record);
         a7.add(classWizards.quantile);
         a7.doLayout();
@@ -3150,10 +3386,8 @@ $(document).ready(function () {
      */
     resetButtons = function () {
         Ext.getCmp('advanced-btn').setDisabled(true);
-        Ext.getCmp('privileges-btn').setDisabled(true);
         Ext.getCmp('workflow-btn').setDisabled(true);
         Ext.getCmp('renamelayer-btn').setDisabled(true);
-        Ext.getCmp('copy-properties-btn').setDisabled(true);
         Ext.getCmp('deletelayer-btn').setDisabled(true);
         Ext.getCmp('movelayer-btn').setDisabled(true);
     };
@@ -3223,7 +3457,6 @@ $(document).ready(function () {
                                     split: true,
                                     width: 600,
                                     layout: "fit",
-
                                     items: new Ext.Panel({
                                         border: false,
                                         region: "center",
@@ -3240,7 +3473,7 @@ $(document).ready(function () {
                                                 tbar: [
                                                     {
                                                         text: '<i class="fa fa-plus-circle"></i> ' + __('New layer'),
-                                                        disabled: (subUser === schema || subUser === false) ? false : true,
+                                                        disabled: (screenName === schema || subUser === false) ? false : true,
                                                         handler: function () {
                                                             onAdd();
                                                         }
@@ -3261,13 +3494,11 @@ $(document).ready(function () {
                                                             overflow: "auto"
                                                         },
                                                         collapsible: false
-
                                                     })
                                                 ]
                                             }),
                                             new Ext.Panel({
                                                 xtype: "panel",
-                                                autoScroll: true,
                                                 region: 'east',
                                                 collapsible: false,
                                                 id: "layerStylePanel",
@@ -3280,15 +3511,8 @@ $(document).ready(function () {
                                                     animate: true
                                                 },
                                                 border: false,
-                                                tbar: [{
-                                                    text: '<i class="fa fa-eye"></i> ' + __('Class wizard'),
-                                                    id: 'stylebutton',
-                                                    disabled: true,
-                                                    handler: function () {
-                                                        var node = tree.getSelectionModel().getSelectedNode();
-                                                        styleWizardWin(node.id);
-                                                    }
-                                                }, '-',
+                                                layout: 'fit',
+                                                tbar: [
                                                     {
                                                         text: "<i class='fa fa-pencil'></i> " + __("Start edit"),
                                                         id: "editlayerbutton",
@@ -3296,8 +3520,7 @@ $(document).ready(function () {
                                                         handler: function (thisBtn, event) {
                                                             try {
                                                                 stopEdit();
-                                                            }
-                                                            catch (e) {
+                                                            } catch (e) {
                                                             }
                                                             var node = tree.getSelectionModel().getSelectedNode();
                                                             var id = node.id.split(".");
@@ -3313,13 +3536,11 @@ $(document).ready(function () {
                                                                     height: 300,
                                                                     icon: Ext.MessageBox.ERROR
                                                                 });
-                                                            }
-                                                            else {
+                                                            } else {
                                                                 var poll = function () {
                                                                     if (typeof filter.win === "object") {
                                                                         filter.win.show();
-                                                                    }
-                                                                    else {
+                                                                    } else {
                                                                         setTimeout(poll, 10);
                                                                     }
                                                                 };
@@ -3345,14 +3566,12 @@ $(document).ready(function () {
                                                                     icon: Ext.MessageBox.ERROR
                                                                 });
                                                                 return false;
-                                                            }
-                                                            else {
+                                                            } else {
                                                                 var filter = new OpenLayers.Filter.Comparison({
                                                                     type: OpenLayers.Filter.Comparison.EQUAL_TO,
                                                                     property: "\"dummy\"",
                                                                     value: "-1"
                                                                 });
-
                                                                 attributeForm.init(id[1], geomField);
                                                                 startWfsEdition(id[1], geomField, filter);
                                                                 attributeForm.form.disable();
@@ -3380,109 +3599,67 @@ $(document).ready(function () {
                                                                 defaults: {
                                                                     border: false
                                                                 },
+                                                                layout: "border",
                                                                 items: [
                                                                     {
                                                                         xtype: "panel",
                                                                         id: "a2",
+                                                                        height: 200,
+                                                                        region: "north",
                                                                         layout: "fit",
-                                                                        height: 200
+                                                                        split: true,
                                                                     },
-                                                                    new Ext.TabPanel({
-                                                                        activeTab: 0,
-                                                                        disabled: true,
-                                                                        region: 'center',
-                                                                        plain: true,
-                                                                        id: "classTabs",
-                                                                        border: false,
-                                                                        height: 570,
-                                                                        resizeTabs: false,
-                                                                        defaults: {
-                                                                            layout: "fit",
-                                                                            border: false
-                                                                        },
-                                                                        tbar: [
-                                                                            {
-                                                                                text: '<i class="fa fa-check"></i> ' + __('Update'),
-                                                                                handler: function () {
-                                                                                    var grid = Ext.getCmp("propGrid");
-                                                                                    var grid2 = Ext.getCmp("propGrid2");
-                                                                                    var grid3 = Ext.getCmp("propGrid3");
-                                                                                    var grid4 = Ext.getCmp("propGrid4");
-                                                                                    var grid5 = Ext.getCmp("propGrid5");
-                                                                                    var source = grid.getSource();
-                                                                                    jQuery.extend(source, grid2.getSource());
-                                                                                    jQuery.extend(source, grid3.getSource());
-                                                                                    jQuery.extend(source, grid4.getSource());
-                                                                                    jQuery.extend(source, grid5.getSource());
-                                                                                    var param = {
-                                                                                        data: source
-                                                                                    };
-                                                                                    param = Ext.util.JSON.encode(param);
-
-                                                                                    Ext.Ajax.request({
-                                                                                        url: '/controllers/classification/index/' + wmsClasses.table + '/' + wmsClass.classId,
-                                                                                        method: 'put',
-                                                                                        params: param,
-                                                                                        headers: {
-                                                                                            'Content-Type': 'application/json; charset=utf-8'
-                                                                                        },
-                                                                                        success: function (response) {
-                                                                                            App.setAlert(App.STATUS_OK, __("Style is updated"));
-                                                                                            writeFiles(wmsClasses.table, map);
-                                                                                            wmsClasses.store.load();
+                                                                    {
+                                                                        xtype: "panel",
+                                                                        region: "center",
+                                                                        layout: "fit",
+                                                                        split: true,
+                                                                        items: [{
+                                                                            xtype: "tabpanel",
+                                                                            activeTab: 0,
+                                                                            disabled: true,
+                                                                            plain: true,
+                                                                            id: "classTabs",
+                                                                            border: false,
+                                                                            resizeTabs: false,
+                                                                            defaults: {
+                                                                                layout: "fit",
+                                                                                border: false
+                                                                            },
+                                                                            tbar: [
+                                                                                {
+                                                                                    text: '<i class="fa fa-check"></i> ' + __('Update'),
+                                                                                    handler: function () {
+                                                                                        wmsClass.save(function () {
                                                                                             store.load();
-                                                                                        },
-                                                                                        failure: function (response) {
-                                                                                            Ext.MessageBox.show({
-                                                                                                title: 'Failure',
-                                                                                                msg: __(Ext.decode(response.responseText).message),
-                                                                                                buttons: Ext.MessageBox.OK,
-                                                                                                width: 400,
-                                                                                                height: 300,
-                                                                                                icon: Ext.MessageBox.ERROR
-                                                                                            });
-                                                                                        }
-                                                                                    });
+                                                                                        });
+                                                                                    }
                                                                                 }
-                                                                            }
-                                                                        ],
-                                                                        items: [
-                                                                            {
-                                                                                xtype: "panel",
-                                                                                id: "a3",
-                                                                                title: "Base"
-                                                                            },
-                                                                            {
-                                                                                xtype: "panel",
-                                                                                id: "a8",
-                                                                                title: "Symbol1"
-                                                                            },
-                                                                            {
-                                                                                xtype: "panel",
-                                                                                id: "a9",
-                                                                                title: "Symbol2"
-                                                                            },
-                                                                            {
-                                                                                xtype: "panel",
-                                                                                id: "a10",
-                                                                                title: "Label1"
-                                                                            },
-                                                                            {
-                                                                                xtype: "panel",
-                                                                                id: "a11",
-                                                                                title: "Label2"
-                                                                            }
-
-                                                                        ]
-                                                                    })
-
-
+                                                                            ],
+                                                                            items: [
+                                                                                {
+                                                                                    xtype: "panel",
+                                                                                    id: "a3",
+                                                                                    title: "Base"
+                                                                                },
+                                                                                {
+                                                                                    xtype: "panel",
+                                                                                    id: "a8",
+                                                                                    title: "Symbols"
+                                                                                },
+                                                                                {
+                                                                                    xtype: "panel",
+                                                                                    id: "a9",
+                                                                                    title: "Labels"
+                                                                                }
+                                                                            ]
+                                                                        }]
+                                                                    }
                                                                 ]
                                                             },
                                                             {
                                                                 xtype: "panel",
                                                                 title: __('Settings'),
-                                                                height: 700,
                                                                 defaults: {
                                                                     border: false
                                                                 },
@@ -3496,7 +3673,6 @@ $(document).ready(function () {
                                                                     {
                                                                         xtype: "panel",
                                                                         id: "a4"
-
                                                                     },
                                                                     {
                                                                         id: 'a5',
@@ -3510,7 +3686,6 @@ $(document).ready(function () {
                                                             {
                                                                 xtype: "panel",
                                                                 title: __('Tile cache'),
-                                                                height: 700,
                                                                 defaults: {
                                                                     border: false
                                                                 },
@@ -3525,8 +3700,8 @@ $(document).ready(function () {
                                                             },
                                                             {
                                                                 xtype: "panel",
-                                                                title: 'Legend',
-                                                                autoHeight: true,
+                                                                title: __('Legend'),
+                                                                border: false,
                                                                 defaults: {
                                                                     border: false,
                                                                     bodyStyle: "padding : 7px"
@@ -3536,7 +3711,25 @@ $(document).ready(function () {
                                                                         xtype: "panel",
                                                                         id: "a6",
                                                                         html: ""
-                                                                    }
+                                                                    },
+                                                                    {
+                                                                        xtype: "panel",
+                                                                        id: "a13"
+                                                                    },
+                                                                ]
+                                                            },{
+                                                                xtype: "panel",
+                                                                title: __('QML'),
+                                                                border: false,
+                                                                defaults: {
+                                                                    border: false,
+                                                                    bodyStyle: "padding : 7px"
+                                                                },
+                                                                items: [
+                                                                    {
+                                                                        xtype: "panel",
+                                                                        id: "a14"
+                                                                    },
                                                                 ]
                                                             }
                                                         ]
@@ -3545,13 +3738,43 @@ $(document).ready(function () {
                                             })
                                         ]
                                     })
-
-
+                                }),
+                                new Ext.Panel({
+                                    id: "classWizardPanel",
+                                    title: "Class wizard",
+                                    hideMode: "visibility",
+                                    floatable: false,
+                                    collapsed: true,
+                                    border: false,
+                                    region: "east",
+                                    collapsible: true,
+                                    split: false,
+                                    plain: true,
+                                    width: 436,
+                                    layout: "fit",
+                                    items: [
+                                        {
+                                            xtype: "panel",
+                                            border: false,
+                                            defaults: {
+                                                border: false
+                                            },
+                                            autoScroll: true,
+                                            items: [
+                                                {
+                                                    xtype: "panel",
+                                                    id: "a7",
+                                                    layout: "fit",
+                                                    items: [
+                                                        classWizards.placeHolder()
+                                                    ]
+                                                }
+                                            ]
+                                        }
+                                    ]
                                 })
-
                             ]
                         })]
-
                     }
                 ]
             },
@@ -3587,7 +3810,6 @@ $(document).ready(function () {
                             xtype: "panel",
                             title: __("Structure"),
                             id: 'structurepanel'
-
                         },
                         {
                             border: false,
@@ -3615,9 +3837,19 @@ $(document).ready(function () {
                                         type: 'GET',
                                         success: function (response, textStatus, http) {
                                             var validProperties = true,
-                                                fieldsForStore = response.forStore,
-                                                columnsForGrid = response.forGrid;
-
+                                                fieldsForStore = response.forStore.map(e => {
+                                                    return {
+                                                        name: e.name.replace(/\./g, '_'),
+                                                        convert: function (v, record) {
+                                                            return record[e.name];  // Adgang til property med prik
+                                                        }
+                                                    }
+                                                }),
+                                                columnsForGrid = response.forGrid
+                                                    .map(e => {
+                                                        e.dataIndex = e.dataIndex.replace(/\./g, '_')
+                                                        return e;
+                                                    });
                                             // We add an editor to the fields
                                             for (var i in columnsForGrid) {
                                                 if (columnsForGrid[i].typeObj !== undefined) {
@@ -3630,8 +3862,7 @@ $(document).ready(function () {
                                                                 triggerAction: 'all'
                                                             });
                                                             validProperties = false;
-                                                        }
-                                                        catch (e) {
+                                                        } catch (e) {
                                                             alert('There is invalid properties on field ' + columnsForGrid[i].dataIndex);
                                                         }
                                                     } else if (columnsForGrid[i].typeObj.type === "int") {
@@ -3648,6 +3879,12 @@ $(document).ready(function () {
                                                         columnsForGrid[i].editor = new Ext.form.TextField();
                                                     } else if (columnsForGrid[i].typeObj.type === "text") {
                                                         columnsForGrid[i].editor = new Ext.form.TextArea();
+                                                    } else if (columnsForGrid[i].typeObj.type === "date") {
+                                                        columnsForGrid[i].editor = new Ext.form.TextField();
+                                                    } else if (columnsForGrid[i].typeObj.type === "timestamp") {
+                                                        columnsForGrid[i].editor = new Ext.form.TextField();
+                                                    } else if (columnsForGrid[i].typeObj.type === "time") {
+                                                        columnsForGrid[i].editor = new Ext.form.TextField();
                                                     }
                                                 }
                                             }
@@ -3666,11 +3903,15 @@ $(document).ready(function () {
                                                             //
                                                         }
                                                     },
-                                                    beforewrite: function () {
+                                                    beforewrite: function (proxy, action, record, options) {
                                                         if (r.data.hasPkey === false) {
                                                             App.setAlert(App.STATUS_NOTICE, __("You can't edit a relation without a primary key"));
                                                             dataStore.reload();
                                                             return false;
+                                                        }
+                                                        if (action === 'update') {
+                                                            // console.log(record);
+                                                            record.data['id.namespace'] = record.get('id_namespace');
                                                         }
                                                     },
                                                     exception: function (proxy, type, action, options, response, arg) {
@@ -3696,7 +3937,7 @@ $(document).ready(function () {
                                                     successProperty: 'success',
                                                     idProperty: r.data.pkey,
                                                     root: 'data',
-                                                    messageProperty: 'message'
+                                                    messageProperty: 'message',
                                                 }, fieldsForStore),
                                                 proxy: proxy,
                                                 autoSave: true
@@ -3704,6 +3945,7 @@ $(document).ready(function () {
                                             dataGrid = new Ext.grid.EditorGridPanel({
                                                 id: "datagridpanel",
                                                 disabled: false,
+                                                stateful: false,
                                                 viewConfig: {
                                                     //forceFit: true
                                                 },
@@ -3731,6 +3973,7 @@ $(document).ready(function () {
                                                             var p = new rec({});
                                                             dataGrid.stopEditing();
                                                             dataStore.insert(0, p);
+                                                            dataStore.load();
                                                         }
                                                     }, {
                                                         text: '<i class="fa fa-cut"></i> ' + __('Delete records'),
@@ -3777,29 +4020,34 @@ $(document).ready(function () {
                         },
                         {
                             border: false,
-                            layout: 'fit',
-                            xtype: "panel",
-                            title: __("Elasticsearch"),
-                            id: 'espanel',
-                            listeners: {
-                                activate: function (e) {
-                                    if (grid.getSelectionModel().getSelections().length > 1) {
-                                        Ext.getCmp("espanel").removeAll();
-                                        return false;
-                                    }
-                                    esPanel = Ext.getCmp("espanel");
+                            layout:
+                                'fit',
+                            xtype:
+                                "panel",
+                            title:
+                                __("Elasticsearch"),
+                            id:
+                                'espanel',
+                            listeners:
+                                {
+                                    activate: function (e) {
+                                        if (grid.getSelectionModel().getSelections().length > 1) {
+                                            Ext.getCmp("espanel").removeAll();
+                                            return false;
+                                        }
+                                        esPanel = Ext.getCmp("espanel");
 
-                                    try {
-                                        esPanel.remove(elasticsearch.grid);
-                                    } catch (ex) {
-                                        console.log(ex.message)
+                                        try {
+                                            esPanel.remove(elasticsearch.grid);
+                                        } catch (ex) {
+                                            console.log(ex.message)
+                                        }
+                                        elasticsearch.grid = null;
+                                        elasticsearch.init(grid.getSelectionModel().getSelected(), parentdb);
+                                        esPanel.add(elasticsearch.grid);
+                                        esPanel.doLayout();
                                     }
-                                    elasticsearch.grid = null;
-                                    elasticsearch.init(grid.getSelectionModel().getSelected(), screenName);
-                                    esPanel.add(elasticsearch.grid);
-                                    esPanel.doLayout();
                                 }
-                            }
 
                         }
                     ]
@@ -3808,17 +4056,22 @@ $(document).ready(function () {
             }),
             {
                 xtype: "panel",
-                title: '<i class="fa fa-users"></i> ' + __('Workflow'),
-                layout: 'border',
-                id: "workflowPanel",
-                listeners: {
-                    activate: function () {
-                        if (!workflowStoreLoaded) {
-                            workflowStore.load();
-                            workflowStoreLoaded = true;
+                title:
+                    '<i class="fa fa-users"></i> ' + __('Workflow'),
+                layout:
+                    'border',
+                id:
+                    "workflowPanel",
+                listeners:
+                    {
+                        activate: function () {
+                            if (!workflowStoreLoaded) {
+                                workflowStore.load();
+                                workflowStoreLoaded = true;
+                            }
                         }
                     }
-                },
+                ,
                 items: [
                     new Ext.grid.GridPanel({
                         id: "workflowGrid",
@@ -3955,7 +4208,7 @@ $(document).ready(function () {
                                         App.setAlert(App.STATUS_NOTICE, __("You've to select a layer"));
                                     }
                                     Ext.Ajax.request({
-                                        url: '/api/v1/meta/' + screenName + '/' + records[0].get("f_schema_name") + "." + records[0].get("f_table_name"),
+                                        url: '/api/v1/meta/' + parentdb + '/' + records[0].get("f_schema_name") + "." + records[0].get("f_table_name"),
                                         method: 'GET',
                                         headers: {
                                             'Content-Type': 'application/json; charset=utf-8'
@@ -3969,9 +4222,9 @@ $(document).ready(function () {
                                                 });
                                             Ext.getCmp("mainTabs").activate(0);
                                             setTimeout(function () {
-                                                mapFrame.attributeForm.init(records[0].get("f_table_name"), r.data[0].pkey);
-                                                mapFrame.startWfsEdition(records[0].get("f_table_name"), r.data[0].f_geometry_column, filter, true);
-                                                mapFrame.attributeForm.form.disable();
+                                                attributeForm.init(records[0].get("f_table_name"), r.data[0].pkey);
+                                                startWfsEdition(records[0].get("f_table_name"), r.data[0].f_geometry_column, filter, true);
+                                                attributeForm.form.disable();
                                             }, 100);
                                         },
                                         failure: function (response) {
@@ -4032,46 +4285,58 @@ $(document).ready(function () {
                         }
                     }
                 ]
-            },
+            }
+            ,
             {
                 xtype: "panel",
-                title: '<i class="fa fa-clock-o"></i> ' + __('Scheduler'),
-                layout: 'border',
-                id: "schedulerPanel",
-                items: [
+                title:
+                    '<i class="fa fa-clock-o"></i> ' + __('Scheduler'),
+                layout:
+                    'border',
+                id:
+                    "schedulerPanel",
+                items:
+                    [
+                        {
+                            frame: false,
+                            border: false,
+                            region: "center",
+                            html: '<iframe frameborder="0" id="scheduler" style="width:100%;height:100%" src="/scheduler/index2.html"></iframe>'
+                        }
+                    ]
+            }
+            ,
+            {
+                xtype: "panel",
+                title:
+                    '<i class="fa fa-list"></i> ' + __('Log'),
+                layout:
+                    'border',
+                border:
+                    false,
+                listeners:
                     {
-                        frame: false,
-                        border: false,
-                        region: "center",
-                        html: '<iframe frameborder="0" id="scheduler" style="width:100%;height:100%" src="/scheduler/index2.html"></iframe>'
+                        activate: function () {
+                            Ext.fly(this.ownerCt.getTabEl(this)).on({
+                                click: function () {
+                                    Ext.Ajax.request({
+                                        url: '/controllers/session/log',
+                                        method: 'get',
+                                        headers: {
+                                            'Content-Type': 'application/json; charset=utf-8'
+                                        },
+                                        success: function (response) {
+                                            $("#gc-log").html(Ext.decode(response.responseText).data);
+                                        }
+                                        //failure: test
+                                    });
+                                }
+                            });
+                        }
+                        ,
+                        single: true
                     }
-                ]
-            },
-            {
-                xtype: "panel",
-                title: '<i class="fa fa-list"></i> ' + __('Log'),
-                layout: 'border',
-                border: false,
-                listeners: {
-                    activate: function () {
-                        Ext.fly(this.ownerCt.getTabEl(this)).on({
-                            click: function () {
-                                Ext.Ajax.request({
-                                    url: '/controllers/session/log',
-                                    method: 'get',
-                                    headers: {
-                                        'Content-Type': 'application/json; charset=utf-8'
-                                    },
-                                    success: function (response) {
-                                        $("#gc-log").html(Ext.decode(response.responseText).data);
-                                    }
-                                    //failure: test
-                                });
-                            }
-                        });
-                    },
-                    single: true
-                },
+                ,
                 items: [
                     {
                         xtype: "panel",
@@ -4087,6 +4352,7 @@ $(document).ready(function () {
         ]
     });
 
+
     /**
      * Create the view port
      */
@@ -4094,6 +4360,11 @@ $(document).ready(function () {
         layout: 'border',
         items: [tabs]
     });
+
+    const classWizardVerticalTitle = document.createElement("div");
+    classWizardVerticalTitle.innerText = "Class wizard";
+    classWizardVerticalTitle.classList.add('vertical-text');
+    document.getElementById("classWizardPanel-xcollapsed").append(classWizardVerticalTitle)
 
     /**
      * TODO Rename to writeMapFile
@@ -4150,18 +4421,43 @@ $(document).ready(function () {
                         return v.toString(16);
                     });
                     l.url = l.url.replace(l.url.split("?")[1], "");
-                    l.url = l.url + "token=" + n;
+                    l.url = l.url + "?token=" + n;
                     setTimeout(function () {
                         l.redraw();
                     }, 500);
 
-                }
-                else {
+                } else {
                     App.setAlert(App.STATUS_NOTICE, __(response.message));
                 }
             }
         });
     };
+
+    changeLayerType = function (layer) {
+        var key = layer.split(".")[0] + "." + layer.split(".")[1];
+        var elId = "#ext-change-type-" + layer.split(".").join("-");
+        var l = map.getLayersByName(key)[0];
+        var split = l.url.split("/");
+        var newUri;
+
+        if (split[3] === "mapcache") {
+            newUri = split[0] + "//" + split[2] + "/ows/" + split[4] + "/" + layer.split(".")[0];
+            l.setTileSize(new OpenLayers.Size(256, 256));
+            l.url = newUri;
+            $(elId).addClass("fa-square").removeClass("fa-delicious");
+
+        } else {
+            newUri = split[0] + "//" + split[2] + "/mapcache/" + split[4] + "/wms";
+            l.url = newUri;
+            $(elId).addClass("fa-delicious").removeClass("fa-square");
+
+        }
+        l.clearGrid();
+
+        setTimeout(function () {
+            l.redraw();
+        }, 500);
+    }
 
     /**
      *
@@ -4171,7 +4467,7 @@ $(document).ready(function () {
         var b = Ext.getCmp("wizardLegend");
         if (activeLayer !== undefined) {
             $.ajax({
-                url: '/api/v1/legend/html/' + screenName + '/' + activeLayer.split(".")[0] + '?l=' + activeLayer,
+                url: '/api/v1/legend/html/' + parentdb + '/' + activeLayer.split(".")[0] + '?l=' + activeLayer,
                 dataType: 'jsonp',
                 jsonp: 'jsonp_callback',
                 success: function (response) {
@@ -4180,8 +4476,7 @@ $(document).ready(function () {
                     try {
                         b.update(response.html);
                         b.doLayout();
-                    }
-                    catch (e) {
+                    } catch (e) {
                     }
                 }
             });
@@ -4215,7 +4510,7 @@ $(document).ready(function () {
      * Add listener on schema select box
      */
     Ext.getCmp("schemabox").on('select', function (e) {
-        window.location = "/admin/" + screenName + "/" + e.value;
+        window.location = "/admin/" + parentdb + "/" + e.value;
     });
 
     /**
@@ -4225,25 +4520,23 @@ $(document).ready(function () {
         var records = sm.getSelections();
         if (records.length === 1) {
             Ext.getCmp('advanced-btn').setDisabled(false);
-            if (subUser === false || subUser === schema) {
-                Ext.getCmp('privileges-btn').setDisabled(false);
+            if (subUser === false || screenName === schema) {
                 Ext.getCmp('workflow-btn').setDisabled(false);
                 Ext.getCmp('renamelayer-btn').setDisabled(false);
-                Ext.getCmp('copy-properties-btn').setDisabled(false);
             }
-        }
-        else {
+        } else {
             Ext.getCmp('advanced-btn').setDisabled(true);
-            Ext.getCmp('privileges-btn').setDisabled(true);
             Ext.getCmp('workflow-btn').setDisabled(true);
             Ext.getCmp('renamelayer-btn').setDisabled(true);
-            Ext.getCmp('copy-properties-btn').setDisabled(true);
         }
         if (records.length > 0 && subUser === false) {
             Ext.getCmp('movelayer-btn').setDisabled(false);
         }
-        if (records.length > 0 && (subUser === false || subUser === schema)) {
+        if (records.length > 0 && (subUser === false || screenName === schema)) {
             Ext.getCmp('deletelayer-btn').setDisabled(false);
+        }
+        if (records.length > 0 && (subUser === false || screenName === schema)) {
+            Ext.getCmp('copy-properties-btn').setDisabled(false);
         }
         onEdit();
     });
@@ -4252,7 +4545,7 @@ $(document).ready(function () {
      * Hide tab if scheduler is not available for the db
      */
     if (window.gc2Options.gc2scheduler !== null) {
-        if (window.gc2Options.gc2scheduler.hasOwnProperty(screenName) === false || window.gc2Options.gc2scheduler[screenName] === false) {
+        if ((window.gc2Options.gc2scheduler.hasOwnProperty(parentdb) === false || window.gc2Options.gc2scheduler[parentdb] === false) && window.gc2Options.gc2scheduler.hasOwnProperty("*") === false) {
             tabs.hideTabStripItem(Ext.getCmp('schedulerPanel'));
         }
     } else {
@@ -4295,16 +4588,16 @@ $(document).ready(function () {
                     cloud.removeTileLayerByName([
                         [response.data[u].f_table_schema + "." + response.data[u].f_table_name]
                     ]);
-                }
-                catch (e) {
+                } catch (e) {
                 }
                 if (response.data[u].type) {
                     layers[[response.data[u].f_table_schema + "." + response.data[u].f_table_name]] = cloud.addTileLayers([response.data[u].f_table_schema + "." + response.data[u].f_table_name], {
-                        singleTile: false,
+                        db: subUser ? screenName + "@" + parentdb : screenName,
+                        singleTile: true,
                         //isBaseLayer: isBaseLayer,
                         visibility: false,
                         wrapDateLine: false,
-                        tileCached: true,
+                        tileCached: false,
                         displayInLayerSwitcher: true,
                         name: response.data[u].f_table_schema + "." + response.data[u].f_table_name
                     });
@@ -4368,6 +4661,7 @@ $(document).ready(function () {
                         var id = e.id.split('.').join('-'), load = function () {
                             if (e.leaf === true && e.parentNode.id !== "baselayers") {
                                 onEditWMSClasses(e.id);
+                                styleWizardWin(e.id);
                             } else {
                                 clearLayerPanel();
                             }
@@ -4376,11 +4670,9 @@ $(document).ready(function () {
                         if (e.leaf === true && e.parentNode.id !== "baselayers") {
                             Ext.getCmp('editlayerbutton').setDisabled(false);
                             Ext.getCmp('quickdrawbutton').setDisabled(false);
-                            Ext.getCmp('stylebutton').setDisabled(false);
                         } else {
                             Ext.getCmp('editlayerbutton').setDisabled(true);
                             Ext.getCmp('quickdrawbutton').setDisabled(true);
-                            Ext.getCmp('stylebutton').setDisabled(true);
                             clearLayerPanel();
                         }
 
@@ -4395,25 +4687,31 @@ $(document).ready(function () {
 
                         try {
                             stopEdit();
-                        }
-                        catch (error) {
+                        } catch (error) {
                         }
 
                         if (typeof filter.win !== "undefined") {
-                            if (typeof  filter.win.hide !== "undefined") {
+                            if (typeof filter.win.hide !== "undefined") {
                                 filter.win.hide();
                             }
                             filter.win = false;
                         }
                         $(".leaf-tools").empty();
+
+                        var split = [];
+                        if (id.split("-").length === 3) {
+                            var split = map.getLayersByName(id.split("-")[0] + "." + id.split("-")[1])[0].url.split("/");
+                        }
+
                         $("#" + id).html(
-                            "<i class='fa fa-arrows-alt layertree-btn' ext:qtip='" + __("Zoom to layer extent") + "' ext id='ext-" + id + "'></i>");
+                            "<i class='fa " + (split[3] === "mapcache" ? "fa-delicious" : "fa-square") + " layertree-btn' ext:qtip='" + __("Change between WMS and Tile Cache") + "' ext id='ext-change-type-" + id + "'></i>  " +
+                            "<i class='fa fa-arrows-alt layertree-btn' ext:qtip='" + __("Zoom to layer extent") + "' ext id='ext-" + id + "'></i>"
+                        );
                         currentId = e.id;
                         $("#edit-" + id).on("click", function () {
                             try {
                                 stopEdit();
-                            }
-                            catch (e) {
+                            } catch (e) {
                             }
                             var node = tree.getSelectionModel().getSelectedNode();
                             var id = node.id.split(".");
@@ -4429,13 +4727,11 @@ $(document).ready(function () {
                                     height: 300,
                                     icon: Ext.MessageBox.ERROR
                                 });
-                            }
-                            else {
+                            } else {
                                 var poll = function () {
                                     if (typeof filter.win === "object") {
                                         filter.win.show();
-                                    }
-                                    else {
+                                    } else {
                                         setTimeout(poll, 10);
                                     }
                                 };
@@ -4459,8 +4755,7 @@ $(document).ready(function () {
                                     icon: Ext.MessageBox.ERROR
                                 });
                                 return false;
-                            }
-                            else {
+                            } else {
                                 var filter = new OpenLayers.Filter.Comparison({
                                     type: OpenLayers.Filter.Comparison.EQUAL_TO,
                                     property: "\"dummy\"",
@@ -4480,13 +4775,17 @@ $(document).ready(function () {
                             }
                         });
 
+                        $("#ext-change-type-" + id).on("click", function () {
+                            changeLayerType(e.id, true)
+                        })
+
                         $("#ext-" + id).on("click", function () {
                             if (metaDataRealKeys[e.id].type === "RASTER") {
                                 App.setAlert(App.STATUS_NOTICE, __('You can only zoom to vector layers.'));
                                 return false;
                             }
                             Ext.Ajax.request({
-                                url: '/api/v1/extent/' + screenName + '/' + e.id + '/900913',
+                                url: '/api/v1/extent/' + parentdb + '/' + e.id + '/3857',
                                 method: 'get',
                                 headers: {
                                     'Content-Type': 'application/json; charset=utf-8'
@@ -4550,10 +4849,13 @@ $(document).ready(function () {
         if (extentRestricted) {
             extentRestrictLayer.addFeatures(new OpenLayers.Feature.Vector(OpenLayers.Bounds.fromArray(settings.extentrestricts[schema]).toGeometry()));
         }
-        if (initExtent !== null) {
-            cloud.map.zoomToExtent(initExtent, false);
-        } else {
-            cloud.map.zoomToMaxExtent();
+        if (!isLoaded) {
+            isLoaded = true;
+            if (initExtent !== null) {
+                cloud.map.zoomToExtent(initExtent, false);
+            } else {
+                cloud.map.zoomToMaxExtent();
+            }
         }
         map.addLayers([extentRestrictLayer]);
         // Remove the loading screen
@@ -4661,7 +4963,7 @@ $(document).ready(function () {
                 }
             });
         }
-        if (typeof(objRef) === "object") {
+        if (typeof (objRef) === "object") {
             measureWin.show(objRef);
         } else {
             measureWin.show();
@@ -4714,10 +5016,33 @@ $(document).ready(function () {
     });
     map.addControl(measureControls.polygon);
 
-    // Always write the MapFile on start up
+// Always write the MapFile on start up
     writeFiles();
 
 });
+
+/**
+ * Setup checks for session and schema in session
+ */
+setInterval(function () {
+    $.ajax({
+        url: '/api/v2/session',
+        dataType: 'json',
+        success: function (data) {
+            if (!data.data.session) {
+                alert(__("You are no longer logged in to GC2. Close or refresh your browser"));
+                return;
+            }
+            if (schema !== data.data.schema) {
+                alert(__("You have started Admin for another schema. Either close this here or refresh your browser"));
+            }
+        },
+        error: function () {
+            alert("Noget gik galt. Prøv at refreshe din browser");
+        }
+    });
+}, 2000);
+
 
 function startWfsEdition(layerName, geomField, wfsFilter, single, timeSlice) {
     'use strict';
@@ -4738,7 +5063,7 @@ function startWfsEdition(layerName, geomField, wfsFilter, single, timeSlice) {
 
     }
     $.ajax({
-        url: '/controllers/table/columns/' + layerName,
+        url: '/controllers/table/columns/' + layerName + '?i=1',
         async: false,
         dataType: 'json',
         type: 'GET',
@@ -4762,8 +5087,7 @@ function startWfsEdition(layerName, geomField, wfsFilter, single, timeSlice) {
                                 triggerAction: 'all'
                             });
                             validProperties = false;
-                        }
-                        catch (e) {
+                        } catch (e) {
                             alert('There is invalid properties on field ' + columnsForGrid[i].dataIndex);
                         }
                     } else if (columnsForGrid[i].typeObj.type === "int") {
@@ -4780,6 +5104,16 @@ function startWfsEdition(layerName, geomField, wfsFilter, single, timeSlice) {
                         columnsForGrid[i].editor = new Ext.form.TextField();
                     } else if (columnsForGrid[i].typeObj.type === "text") {
                         columnsForGrid[i].editor = new Ext.form.TextArea();
+                    } else if (columnsForGrid[i].typeObj.type === "date") {
+                        columnsForGrid[i].editor = new Ext.form.TextField();
+                    } else if (columnsForGrid[i].typeObj.type === "timestamp") {
+                        columnsForGrid[i].editor = new Ext.form.TextField();
+                    } else if (columnsForGrid[i].typeObj.type === "time") {
+                        columnsForGrid[i].editor = new Ext.form.TextField();
+                    } else if (columnsForGrid[i].typeObj.type === "timestamptz") {
+                        columnsForGrid[i].editor = new Ext.form.TextField();
+                    } else if (columnsForGrid[i].typeObj.type === "timetz") {
+                        columnsForGrid[i].editor = new Ext.form.TextField();
                     }
                 }
             }
@@ -4787,11 +5121,9 @@ function startWfsEdition(layerName, geomField, wfsFilter, single, timeSlice) {
     });
     if (type === "Point") {
         handlerType = OpenLayers.Handler.Point;
-    }
-    else if (type === "Polygon") {
+    } else if (type === "Polygon") {
         handlerType = OpenLayers.Handler.Polygon;
-    }
-    else if (type === "Path") {
+    } else if (type === "Path") {
         handlerType = OpenLayers.Handler.Path;
     }
     south.expand(true);
@@ -4869,12 +5201,12 @@ function startWfsEdition(layerName, geomField, wfsFilter, single, timeSlice) {
     layer = new OpenLayers.Layer.Vector("vector", {
         strategies: [new OpenLayers.Strategy.Fixed(), saveStrategy],
         protocol: new OpenLayers.Protocol.WFS.v1_0_0({
-            url: "/wfs/" + (subUser ? subUser + "@" + screenName : screenName) + "/" + schema + "/900913" + (timeSlice ? "/" + timeSlice : "") + "?",
+            url: "/wfs/" + (subUser ? screenName + "@" + parentdb : screenName) + "/" + schema + "/3857" + (timeSlice ? "/" + timeSlice : "") + "?",
             version: "1.0.0",
             featureType: layerName,
-            featureNS: "http://mapcentia.com/" + screenName,
-            featurePrefix: screenName,
-            srsName: "EPSG:900913",
+            featureNS: "http:" + "//" + location.hostname + (location.port ? ":" + location.port : "") + "/" + parentdb + "/" + schema,
+            featurePrefix: schema,
+            srsName: "EPSG:3857",
             geometryName: geomField, // must be dynamamic
             defaultFilter: wfsFilter
         }),
@@ -4956,9 +5288,7 @@ function startWfsEdition(layerName, geomField, wfsFilter, single, timeSlice) {
         id: "gridpanel",
         region: "center",
         disabled: false,
-        viewConfig: {
-            //forceFit: true
-        },
+        stateful: false,
         store: featureStore,
         listeners: {
             afteredit: function (e) {
@@ -4977,14 +5307,7 @@ function startWfsEdition(layerName, geomField, wfsFilter, single, timeSlice) {
                 }
             },
             columns: columnsForGrid
-        })/*,
-         bbar: [new Ext.PagingToolbar({
-         pageSize: 2,
-         store: store,
-         displayInfo: true,
-         displayMsg: 'Features {0} - {1} of {2}',
-         emptyMsg: "No features"
-         })]*/
+        })
     });
 
     south.add(grid);
@@ -5024,8 +5347,7 @@ function stopEdit() {
     try {
         filter.win.hide();
         filter.win = false;
-    }
-    catch (e) {
+    } catch (e) {
     }
     Ext.getCmp('editcreatebutton').toggle(false);
     Ext.getCmp('editcreatebutton').setDisabled(true);
@@ -5049,9 +5371,9 @@ function onInsert() {
 }
 
 function array_unique(ar) {
-    return ar.filter( function onlyUnique(value, index, self) {
+    return ar.filter(function onlyUnique(value, index, self) {
         return self.lastIndexOf(value) === index;
-    } )
+    })
 }
 
 saveStrategy = new OpenLayers.Strategy.Save({

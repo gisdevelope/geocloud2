@@ -1,0 +1,442 @@
+ARG ECW_VERSION=3
+ARG PHP_VERSION=8.4
+
+###############################################################################
+# Base image
+###############################################################################
+FROM debian:trixie-slim AS base
+LABEL maintainer="Martin Høgh <mh@mapcentia.com>"
+
+# Non-interactive mode for apt
+ENV DEBIAN_FRONTEND=noninteractive
+# Debian release codename; used for the Sury PHP, Apache Arrow and QGIS apt suites.
+ENV DEBIAN_CODENAME=trixie
+ARG PHP_VERSION
+ENV PHP_VERSION=${PHP_VERSION}
+
+# 1) Update and install wget + gnupg2 in the same step
+RUN apt-get -y  update && apt-get -y install wget gnupg2 && rm -rf /var/lib/apt/lists/*
+
+# Add PHP8 repo
+RUN set -eux; \
+    apt-get install -y --no-install-recommends wget gnupg; \
+    wget -qO /usr/share/keyrings/sury-php.gpg https://packages.sury.org/php/apt.gpg; \
+    echo "deb [signed-by=/usr/share/keyrings/sury-php.gpg] https://packages.sury.org/php/ ${DEBIAN_CODENAME} main" > /etc/apt/sources.list.d/sury-php.list; \
+    apt-get update && \
+    apt-get install -y \
+    cron vim g++ build-essential git unzip rng-tools \
+    apache2-utils postgresql-client supervisor \
+    apache2 apache2-dev \
+    php${PHP_VERSION}-fpm php${PHP_VERSION}-pgsql php${PHP_VERSION}-redis php${PHP_VERSION}-memcached \
+    php${PHP_VERSION}-curl php${PHP_VERSION}-sqlite3 php${PHP_VERSION}-mbstring php${PHP_VERSION}-gd \
+    php${PHP_VERSION}-cli php${PHP_VERSION}-dev php${PHP_VERSION}-zip php${PHP_VERSION}-simplexml php${PHP_VERSION}-dba \
+    cmake librsvg2-dev libpng++-dev libjpeg-dev libfreetype6-dev \
+    libproj-dev libfribidi-dev libharfbuzz-dev libcairo2-dev libgeos++-dev \
+    curl libapache2-mod-fcgid libfcgi-dev xvfb osm2pgsql postgis sudo \
+    apt-transport-https ca-certificates \
+    libprotobuf-c-dev libprotobuf-dev libprotobuf-c1 libprotobuf32t64 \
+    protobuf-compiler protobuf-c-compiler libtool python3-dev bison \
+    python3-setuptools jq libwxgtk3.2-dev libuv1-dev libpq-dev libxml2-dev libgif-dev libxerces-c-dev\
+    && rm -rf /var/lib/apt/lists/*
+
+###############################################################################
+# PECL modules (pq and uv)
+###############################################################################
+RUN pecl install raphf \
+    && echo "extension=raphf.so" >> /etc/php/${PHP_VERSION}/cli/php.ini \
+    && pecl install pq \
+    && pecl config-set preferred_state beta \
+    && pecl install uv \
+    && echo "extension=pq.so" >> /etc/php/${PHP_VERSION}/cli/php.ini \
+    && echo "extension=uv.so" >> /etc/php/${PHP_VERSION}/cli/php.ini
+
+###############################################################################
+# SWIG > 4.0.0 to get PHP8 support
+###############################################################################
+RUN git clone --depth 1 https://github.com/swig/swig.git \
+    && cd swig \
+    && mkdir build && cd build \
+    && cmake .. \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd ../.. \
+    && rm -rf swig
+
+###############################################################################
+# Make php-fpm run in the foreground
+###############################################################################
+RUN sed -i 's/;daemonize = yes/daemonize = no/' /etc/php/${PHP_VERSION}/fpm/php-fpm.conf
+
+# Hide server version and OS from Apache
+RUN sed -i '/ServerTokens OS/c\ServerTokens Prod' /etc/apache2/conf-enabled/security.conf \
+    && sed -i '/ServerSignature On/c\ServerSignature Off' /etc/apache2/conf-enabled/security.conf
+
+###############################################################################
+# Node.js
+###############################################################################
+RUN curl -sL https://deb.nodesource.com/setup_24.x -o nodesource_setup.sh &&\
+    bash nodesource_setup.sh &&\
+    apt-get install -y nodejs
+
+###############################################################################
+# Enable Apache modules
+###############################################################################
+RUN a2enmod rewrite headers expires include actions alias fcgid proxy proxy_http \
+    proxy_ajp proxy_balancer proxy_connect proxy_html xml2enc proxy_wstunnel \
+    proxy_fcgi http2 \
+    && a2enconf serve-cgi-bin \
+    && a2dismod deflate -f
+
+# Start fpm (so dirs are created)
+RUN service php${PHP_VERSION}-fpm start || true
+
+###############################################################################
+# ecw 3.3 Stage
+###############################################################################
+FROM base AS ecw3
+
+# ECW JPEG 2000 SDK 3.3 is third-party software distributed and used
+# under the ECW JPEG 2000 SDK Public Use License Agreement.
+#
+# The original, unmodified SDK distribution is redistributed separately
+# from GC2 and retains its original copyright notices, license terms
+# and disclaimers.
+
+RUN wget https://s3-eu-west-1.amazonaws.com/mapcentia-www/software/libecwj2-3.3-2006-09-06.zip \
+    && unzip libecwj2-3.3-2006-09-06.zip \
+    && wget https://s3-eu-west-1.amazonaws.com/mapcentia-www/software/libecwj2-3.3-msvc90-fixes.patch \
+    && patch -p0 < ../libecwj2-3.3-msvc90-fixes.patch \
+    && wget https://s3-eu-west-1.amazonaws.com/mapcentia-www/software/libecwj2-3.3-wcharfix.patch \
+    && wget https://s3-eu-west-1.amazonaws.com/mapcentia-www/software/libecwj2-3.3-NCSPhysicalMemorySize-Linux.patch \
+    && cd libecwj2-3.3 \
+    && patch -p0 < ../libecwj2-3.3-NCSPhysicalMemorySize-Linux.patch \
+    && patch -p1 < ../libecwj2-3.3-wcharfix.patch \
+    && ./configure \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd .. \
+    && rm -rf libecwj2-3.3-2006-09-06.zip libecwj2-3.3
+
+###############################################################################
+# ecw 5.3 Stage
+###############################################################################
+FROM base AS ecw5
+
+# ERDAS ECW/JP2 SDK 5.x is proprietary software and is NOT distributed with GC2.
+#
+# To build this stage, obtain the SDK directly from Hexagon and place:
+#
+#   ERDAS-ECW_JPEG_2000_SDK-5.3.0.zip
+#
+# in the vendor/ directory.
+#
+# GC2 is server software. You are responsible for obtaining an appropriate
+# Hexagon license for your intended use. The free Desktop Read-Only license
+# may not permit use of the SDK in a server application.
+#
+# See Hexagon's ECW/JP2 SDK license terms for details.
+
+ARG ECW_SDK_VARIANT
+RUN test -n "$ECW_SDK_VARIANT" || \
+      (echo "ECW_SDK_VARIANT must be specified according to your Hexagon license" && exit 1)
+
+COPY vendor/ERDAS-ECW_JPEG_2000_SDK-5.3.0.zip ERDAS-ECW_JPEG_2000_SDK-5.3.0.zip
+RUN unzip ERDAS-ECW_JPEG_2000_SDK-5.3.0.zip &&\
+    mkdir /usr/local/hexagon &&\
+    cp -r ERDAS-ECW_JPEG_2000_SDK-5.3.0/${ECW_SDK_VARIANT}/* /usr/local/hexagon &&\
+    ln -s /usr/local/hexagon/lib/x64/release/libNCSEcw.so /usr/local/lib/libNCSEcw.so &&\
+    ln -s /usr/local/hexagon/lib/x64/release/libNCSEcw.so.5.3.0 /usr/local/lib/libNCSEcw.so.5.3.0 &&\
+    ldconfig
+
+###############################################################################
+# gdal Stage (ecw 3.3)
+###############################################################################
+FROM ecw3 AS gdal3
+
+# GDAL 3.12.x is the newest line that still ships the MIN/MAX/ABS macros and char** metadata API the
+# MapServer rsvg_fix branch (2024-09 main) relies on. Moving to GDAL >= 3.13 needs that fork rebased on
+# upstream MapServer >= 8.4 first.
+ENV GDAL_VERSION=3.12.4
+# Apache Arrow/Parquet libs for the GDAL (Geo)Parquet driver. Pinned to a release
+# verified to build with the GDAL version above; a newer Arrow major may break the
+# GDAL build, so bump the two together and rebuild the gdal3 stage.
+ENV ARROW_VERSION=25.0.1-1
+
+RUN wget -q https://packages.apache.org/artifactory/arrow/debian/apache-arrow-apt-source-latest-${DEBIAN_CODENAME}.deb \
+    && apt-get install -y ./apache-arrow-apt-source-latest-${DEBIAN_CODENAME}.deb \
+    && rm apache-arrow-apt-source-latest-${DEBIAN_CODENAME}.deb \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libarrow-dev=${ARROW_VERSION} \
+        libarrow-acero-dev=${ARROW_VERSION} \
+        libarrow-dataset-dev=${ARROW_VERSION} \
+        libparquet-dev=${ARROW_VERSION} \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN wget -q "https://download.osgeo.org/gdal/${GDAL_VERSION}/gdal$(echo ${GDAL_VERSION} | tr -d .).zip" -O gdal.zip \
+    && unzip gdal.zip \
+    && rm gdal.zip
+
+WORKDIR /gdal-$GDAL_VERSION/build
+
+# Build GDAL with ECW, LibKML and Arrow/Parquet (GeoParquet). The GDAL_USE_*
+# flags make the build fail loudly instead of silently dropping the drivers.
+ENV GDAL_PYTHON_BINDINGS_WITHOUT_NUMPY=YES
+RUN cmake -DBUILD_PYTHON_BINDINGS=OFF -DWITH_LIBKML=YES -DWITH_ECW=/usr/local/ \
+    -DGDAL_USE_ARROW=ON -DGDAL_USE_PARQUET=ON -DGDAL_USE_ARROWDATASET=ON \
+    -DCMAKE_BUILD_TYPE=Release .. \
+    && cmake --build . -j"$(nproc)" \
+    && cmake --build . --target install \
+    && ln -s /usr/local/bin/ogr2ogr /usr/bin/ogr2ogr
+
+WORKDIR /
+RUN rm -rf /gdal-$GDAL_VERSION
+
+###############################################################################
+# gdal Stage (ecw 5.3)
+###############################################################################
+FROM ecw5 AS gdal5
+
+# Building this target requires the ERDAS ECW/JP2 SDK 5.3, which is
+# proprietary software and is not distributed with GC2.
+#
+# GC2 is server software. Users are responsible for obtaining the SDK
+# directly from Hexagon and ensuring that their license permits the
+# intended server use.
+
+ENV GDAL_VERSION=3.5.3
+
+RUN wget https://download.osgeo.org/gdal/${GDAL_VERSION}/gdal353.zip \
+ && unzip gdal353.zip \
+ && cd gdal-${GDAL_VERSION} \
+ && ./configure \
+    --with-python=no \
+    --with-ecw=/usr/local/hexagon \
+    --without-libkml \
+    --without-libdwg \
+    CXXFLAGS='-D_GLIBCXX_USE_CXX11_ABI=0' \
+ && make -j"$(nproc)" \
+ && make install \
+ && ldconfig \
+ && ln -s /usr/local/bin/ogr2ogr /usr/bin/ogr2ogr \
+ && cd .. \
+ && rm -rf gdal353.zip gdal-${GDAL_VERSION}
+
+###############################################################################
+# mapserver Stage
+###############################################################################
+FROM gdal${ECW_VERSION} AS mapserver
+
+ARG PHP_VERSION
+ENV PHP_VERSION=${PHP_VERSION}
+
+# Git ref (tag, branch or commit) of geocloud2 to build into the image.
+# Default 'master' preserves the old behaviour; pass --build-arg GC2_REF=<tag>
+# at release time to pin the image to a released tag (reproducible image<->tag).
+ARG GC2_REF=master
+
+# Set php session + upload sizes
+RUN sed -i "s/session.gc_maxlifetime = 1440/session.gc_maxlifetime = 86400/g" /etc/php/${PHP_VERSION}/fpm/php.ini \
+    && sed -i "s/upload_max_filesize = 2M/upload_max_filesize = 1000M/g" /etc/php/${PHP_VERSION}/fpm/php.ini \
+    && sed -i "s/post_max_size = 8M/post_max_size = 1000M/g" /etc/php/${PHP_VERSION}/fpm/php.ini
+
+# Build MapServer 8.0 from source
+RUN git clone --depth 1 --branch rel-8-6-6 https://github.com/MapServer/MapServer.git \
+    && cd MapServer \
+    && mkdir build && cd build \
+    && cmake \
+      -DCMAKE_INSTALL_PREFIX=/opt \
+      -DCMAKE_PREFIX_PATH="/usr/local/pgsql/94:/usr/local:/opt:/usr/include" \
+      -DWITH_CLIENT_WFS=ON \
+      -DWITH_CLIENT_WMS=ON \
+      -DWITH_CURL=ON \
+      -DWITH_SOS=ON \
+      -DWITH_PHPNG=ON \
+      -DWITH_ORACLESPATIAL=OFF \
+      -DWITH_RSVG=ON \
+      -DWITH_POINT_Z_M=ON \
+      -DWITH_KML=ON \
+      -DWITH_LIBKML=ON \
+      -DWITH_KMZ=ON \
+      -DWITH_SVGCAIRO=OFF \
+      .. \
+    && make -j"$(nproc)" \
+    && make install \
+    && cp mapserv /usr/lib/cgi-bin/mapserv.fcgi
+
+# Enable PHP-MapScript
+RUN echo "extension=php_mapscriptng.so" >> /etc/php/${PHP_VERSION}/fpm/php.ini
+
+# Build MapCache from source
+# MapCache >= 1.10 uses apr-util's built-in apr_memcache (WITH_MEMCACHE); libapr-memcache-dev is gone in trixie.
+RUN apt-get update && apt-get install -y --no-install-recommends libaprutil1-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone --depth 1 --branch rel-1-16-0 http://github.com/mapserver/mapcache.git \
+    && cd mapcache \
+    && mkdir build && cd build \
+    && cmake .. -DWITH_MEMCACHE=1 \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd ../.. \
+    && rm -rf mapcache
+
+# Install QGIS Server
+RUN wget -qO - https://qgis.org/downloads/qgis-2022.gpg.key \
+    | gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/qgis-archive.gpg --import \
+    && chmod a+r /etc/apt/trusted.gpg.d/qgis-archive.gpg \
+    && echo "deb https://qgis.org/debian-ltr ${DEBIAN_CODENAME} main" > /etc/apt/sources.list.d/qgis.list \
+    && apt-get update && apt-get install -y --no-install-recommends qgis-server \
+    && rm -rf /var/lib/apt/lists/*
+
+# Symlink fonts for QGIS server (slightly corrected syntax)
+RUN ln -s /usr/share/fonts /usr/lib/x86_64-linux-gnu/fonts
+
+
+RUN mkdir /mapcache \
+    && cp /root/mapcache/mapcache.xml /mapcache/ 2>/dev/null || true
+
+# Add Apache, PHP-FPM, Supervisor conf from local context
+ADD conf/apache/000-default.conf /etc/apache2/sites-enabled/000-default.conf
+ADD conf/supervisor/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+ADD conf/fpm/www.conf /etc/php/${PHP_VERSION}/fpm/pool.d/www.conf
+
+# Create start scripts for Apache2 and PHP-FPM
+RUN cat <<EOF > /run-apache.sh
+#!/bin/bash
+rm -rf /var/run/apache2/*
+exec /usr/sbin/apachectl -D FOREGROUND
+EOF
+RUN chmod +x /run-apache.sh
+
+RUN cat <<EOF > /run-fpm.sh
+#!/bin/bash
+rm -f /var/run/php-fpm.sock
+exec /usr/sbin/php-fpm${PHP_VERSION}
+EOF
+RUN chmod +x /run-fpm.sh
+
+RUN a2disconf other-vhosts-access-log
+
+# Opcache config
+COPY conf/fpm/opcache.ini /etc/php/${PHP_VERSION}/mods-available/
+
+# ogr2postgis
+RUN git clone --depth 1 --branch gui https://github.com/mapcentia/ogr2postgis.git \
+    && cd ogr2postgis \
+    && mkdir build && cd build \
+    && cmake .. \
+    && make -j"$(nproc)" \
+    && make install \
+    && cd ../.. \
+    && rm -rf ogr2postgis
+
+# gc2-cli
+RUN npm install @mapcentia/gc2-cli -g
+
+EXPOSE 80 443
+
+# Healthcheck
+HEALTHCHECK --interval=5s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl --fail http://127.0.0.1/fpm-ping || exit 1
+
+# Clone GC2 from GitHub
+RUN mkdir -p /var/www \
+    && cd /var/www \
+    && git clone --depth 1 https://github.com/mapcentia/geocloud2.git \
+    && cd geocloud2 \
+    && git checkout ${GC2_REF}
+
+# Set workdir
+WORKDIR /var/www/geocloud2
+
+# Instal composer
+RUN set -e; cd app \
+    && EXPECTED_SIGNATURE="$(php -r "echo file_get_contents('https://composer.github.io/installer.sig');")" \
+    && php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" \
+    && ACTUAL_SIGNATURE="$(php -r "echo hash_file('sha384', 'composer-setup.php');")" \
+    && if [ "$EXPECTED_SIGNATURE" != "$ACTUAL_SIGNATURE" ]; then echo 'Installer corrupt' >&2; rm composer-setup.php; exit 1; fi \
+    && php composer-setup.php \
+    && php -r "unlink('composer-setup.php');"
+
+ADD entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
+
+# Symlink Dashboard
+RUN ln -s /var/www/geocloud2/dashboard/build/ /var/www/geocloud2/public/dashboard
+
+# Final CMD
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+
+###############################################################################
+# Cron jobs Stage
+###############################################################################
+FROM mapserver AS cron
+
+# Clean up job for app/tmp
+RUN crontab -l 2>/dev/null | { cat; echo "0 0 * * * php -f /var/www/geocloud2/app/scripts/clean_tmp_dir.php > /proc/1/fd/1 2>&1"; } | crontab
+# Clean up job for tmp tables
+RUN crontab -l 2>/dev/null | { cat; echo "0 0 * * * php -f /var/www/geocloud2/app/scripts/clean_scheduler_tables.php > /proc/1/fd/1 2>&1"; } | crontab
+# Keep app/wms/mapcache/mapcache.conf in sync with the per-database MapCache xml files (replaces the
+# watch_mapcache_changes.sh + reload.js watcher). Runs as root: it validates and gracefully reloads Apache.
+RUN crontab -l 2>/dev/null | { cat; echo "* * * * * php -f /var/www/geocloud2/app/scripts/mapcache_conf.php > /proc/1/fd/1 2>&1"; } | crontab
+# Create scheduler report once a day
+RUN crontab -l 2>/dev/null | { cat; echo "0 6 * * * php -f /var/www/geocloud2/app/scripts/job_report.php > /proc/1/fd/1 2>&1"; } | crontab
+# Run scheduler
+RUN crontab -l 2>/dev/null | { cat; echo "* * * * * sudo -u www-data php -f /var/www/geocloud2/app/scripts/scheduler.php > /proc/1/fd/1 2>&1"; } | crontab
+# Functions: enqueue due scheduled invocations, dispatch DB-event triggers, run the queue.
+# All three are DB/HTTP only (with functionRunner=HttpFunctionRunner the worker just
+# calls the gc2-function-runner service), so they run safely as www-data.
+RUN crontab -l 2>/dev/null | { cat; echo "* * * * * sudo -u www-data php -f /var/www/geocloud2/app/scripts/function_scheduler.php > /proc/1/fd/1 2>&1"; } | crontab
+RUN crontab -l 2>/dev/null | { cat; echo "* * * * * sudo -u www-data php -f /var/www/geocloud2/app/scripts/function_event_dispatcher.php > /proc/1/fd/1 2>&1"; } | crontab
+RUN crontab -l 2>/dev/null | { cat; echo "* * * * * sudo -u www-data php -f /var/www/geocloud2/app/scripts/function_worker.php > /proc/1/fd/1 2>&1"; } | crontab
+# Parquet snapshots: export queued relations to S3 (see app/scripts/snapshot_worker.php).
+# flock -n guards against overlapping runs when one export takes longer than a minute.
+RUN crontab -l 2>/dev/null | { cat; echo "* * * * * sudo -u www-data flock -n /tmp/snapshot_worker.lock php -f /var/www/geocloud2/app/scripts/snapshot_worker.php > /proc/1/fd/1 2>&1"; } | crontab
+# Tile seeder: claim pending seed jobs and spawn one seed_run.php per job (see app/scripts/seed_worker.php).
+# flock -n guards against overlapping ticks when the previous tick has not returned yet.
+# -o (--close) closes the lock fd in the tick's child before it execs php, so the
+# detached seed run it spawns (which can live for hours) never inherits the lock;
+# without it every later tick would fail flock -n silently until the seed ends.
+RUN crontab -l 2>/dev/null | { cat; echo "* * * * * sudo -u www-data flock -n -o /tmp/seed_worker.lock php -f /var/www/geocloud2/app/scripts/seed_worker.php > /proc/1/fd/1 2>&1"; } | crontab
+
+# (Optional) finalize crontab
+RUN crontab -l 2>/dev/null | { cat; echo ""; } | crontab
+
+###############################################################################
+# Dev Stage (final)
+###############################################################################
+FROM cron AS dev
+
+ARG PHP_VERSION
+ENV PHP_VERSION=${PHP_VERSION}
+ARG GC2_REF=master
+
+# Get latest source, but only when GC2_REF is a branch. A pinned tag/commit
+# leaves HEAD detached, where 'git pull' has no upstream and would fail.
+RUN git symbolic-ref -q HEAD >/dev/null && git pull || echo "GC2_REF=${GC2_REF} is detached; skipping pull"
+
+# Build front-end assets with Node (replaces the old Grunt build)
+RUN npm install \
+    && node build.mjs production \
+    && node hacks.mjs
+
+# Copy in GC2 custom config
+COPY conf/gc2/App.php /var/www/geocloud2/app/conf/
+COPY conf/gc2/Connection.php /var/www/geocloud2/app/conf/
+
+# Build dashboard
+RUN cd dashboard \
+    && npm install \
+    && npm run build
+
+# VOLUME for geocloud2 if you want persistence
+VOLUME /var/www/geocloud2
+
+# Xdebug (if needed for dev)
+RUN apt-get update && apt-get install -y --no-install-recommends php${PHP_VERSION}-xdebug \
+    && rm -rf /var/lib/apt/lists/*
+COPY conf/fpm/xdebug.ini /etc/php/${PHP_VERSION}/mods-available/
+RUN phpenmod xdebug
+
+
